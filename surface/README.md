@@ -26,6 +26,11 @@ fixtures (`web-test.mp4` …) come from the editor dist; never commit them.
 
 ## Keys and gestures
 
+The camera is off until you press **Turn camera on** in the Hands section. Everything else (mouse,
+keys, push-to-talk, typed corrections, first cut, TRIBE suggestions) works without it. Turning it off
+stops the camera and resets the hand state to Idle; a scrub in progress keeps its position, and a
+pinch-started recording is cancelled. A refused or missing camera leaves the toggle off with a note.
+
 The editor keeps the keyboard while it has focus: Space, J/K/L, Cmd+Z, and the other editor keys work as usual.
 Click the panel to give it the keyboard. The header shows `Keys → editor` or `Keys → panel`.
 Typing in a panel field never triggers shortcuts. Esc works everywhere in the panel.

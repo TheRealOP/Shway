@@ -88,6 +88,8 @@
 
   <section>
     <h2>Hands</h2>
+    <button id="cam" aria-pressed="false">Turn camera on</button>
+    <span class="note">Optional. Mouse, keys and voice work without it.</span>
     <div class="stage"><video id="v" autoplay muted playsinline></video><canvas id="o"></canvas></div>
     <div id="state" data-s="Idle">Idle</div>
     <dl>
@@ -177,7 +179,7 @@ const $ = (id) => document.getElementById(id);
 const frame = $("ed");
 const keys = { key: false, fine: false, cancel: false };
 let recognizer = createRecognizer();
-const hold = createHoldToTalk();
+let hold = createHoldToTalk();
 const voice = createVoice();
 let flash = null, stream = null, adapter = null, api = null, bridge = null, lastHand = null;
 let context = { revision: null, sequence: null, selection: [], target: null, playhead: null, gesture: "Idle" };
@@ -431,20 +433,45 @@ async function gemini() {
 }
 gemini(); setInterval(gemini, 10000);
 
-// ---- Camera and microphone: both optional; failures are reported, the editor keeps working.
-(async () => {
-  const video = $("v");
-  try { await openCamera(video); }
-  catch (e) { return void ($("camErr").textContent = `Camera unavailable: ${e.name}: ${e.message}. Mouse and keys still work.`); }
-  if (video.videoWidth && video.videoHeight) recognizer = createRecognizer({ aspect: video.videoWidth / video.videoHeight });
-  await runHands(video, (t, _t0, hand) => onFrame(t, hand));
-})().catch((e) => { $("camErr").textContent = `Hand tracking failed: ${e.message}`; });
+// ---- Camera: off until the creator turns it on; failures are reported, the editor keeps working.
+let handsLoop = null;
+async function setCamera(on) {
+  const video = $("v"), button = $("cam");
+  button.disabled = true;
+  $("camErr").textContent = "";
+  try {
+    if (on) {
+      await openCamera(video);
+      recognizer = createRecognizer(video.videoWidth && video.videoHeight ? { aspect: video.videoWidth / video.videoHeight } : undefined);
+      handsLoop ??= runHands(video, (t, _t0, hand) => onFrame(t, hand)); // one loop; it idles while no frames arrive
+      await handsLoop;
+    } else {
+      for (const track of video.srcObject?.getTracks() ?? []) track.stop();
+      video.srcObject = null;
+      if (voice.view().recording && voice.view().source === "gesture") talk(voice.cancel(performance.now()));
+      recognizer = createRecognizer(); hold = createHoldToTalk(); // back to Idle: no half-finished scrub or pinch survives
+      lastHand = null; flash = null;
+      const c = $("o"); c.getContext("2d")?.clearRect(0, 0, c.width, c.height);
+    }
+  } catch (e) {
+    handsLoop = null;
+    for (const track of video.srcObject?.getTracks() ?? []) track.stop();
+    video.srcObject = null;
+    on = false;
+    $("camErr").textContent = `Camera unavailable: ${e.name ?? "Error"}: ${e.message}. Mouse, keys and voice still work.`;
+  }
+  button.textContent = on ? "Turn camera off" : "Turn camera on";
+  button.setAttribute("aria-pressed", String(on));
+  button.disabled = false;
+  render();
+}
+$("cam").onclick = () => setCamera($("cam").getAttribute("aria-pressed") !== "true");
 openMic().then((m) => { if (m.error) $("voiceErr").textContent = m.error; else stream = m.stream; });
 
 // Automation / testing hooks.
 window.shwayDemo = {
   gesture: (e) => onGesture({ t: performance.now(), ...e }), frame: (hand, k = {}) => { Object.assign(keys, k); onFrame(performance.now(), hand); },
-  proposals, voice, tribe: onTribe, get adapter() { return adapter; }, get context() { return context; }, get recognizer() { return recognizer; },
+  proposals, voice, tribe: onTribe, camera: setCamera, get adapter() { return adapter; }, get context() { return context; }, get recognizer() { return recognizer; },
 };
 render();
 </script>
