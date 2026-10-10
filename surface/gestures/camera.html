@@ -86,7 +86,7 @@ const BONES = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,
 const COLORS = { Idle: "#bbb", Armed: "#2c9", Adjusting: "#3cf", TrackingLost: "#f80", Cancelled: "#f80" };
 const LABELS = { Idle: "pinch or hold Space", Armed: "armed — twist to scrub", Adjusting: "scrubbing",
   TrackingLost: "tracking lost — let go to re-engage", Cancelled: "cancelled — let go to re-engage" };
-let flash = null; // {direction, until}
+let flash = null; // {text, until}
 
 function drawOverlay(canvas, hand, v, now) {
   const w = canvas.width, h = canvas.height, g = canvas.getContext("2d");
@@ -98,7 +98,7 @@ function drawOverlay(canvas, hand, v, now) {
     g.fillStyle = "rgba(60,200,255,0.85)";
     g.font = "700 64px system-ui, sans-serif";
     g.textAlign = "center";
-    g.fillText(flash.direction === "right" ? "→" : "←", w / 2, 80);
+    g.fillText(flash.text, w / 2, 80);
     g.font = "600 16px system-ui, sans-serif";
   }
   if (!hand) {
@@ -118,6 +118,15 @@ function drawOverlay(canvas, hand, v, now) {
   const R = Math.max(50, Math.hypot(P[9].x - P[0].x, P[9].y - P[0].y) * 1.2);
   const engaged = v.state === "Armed" || v.state === "Adjusting";
 
+  if (!engaged && v.blade) {
+    // Chop-ready: a blade line along the hand, pointing down.
+    g.strokeStyle = "#f5c"; g.lineWidth = 4; g.setLineDash([10, 6]);
+    g.beginPath(); g.moveTo(cx, cy - R); g.lineTo(cx, cy + R * 1.6); g.stroke(); g.setLineDash([]);
+    g.fillStyle = "#f5c"; g.textAlign = "center"; g.fillText("chop down to cut", cx, cy + R * 1.6 + 20);
+  }
+  if (!engaged && v.tapping) {
+    g.fillStyle = "#fc3"; g.beginPath(); g.arc(P[4].x, P[4].y, 10, 0, 7); g.fill();
+  }
   if (!engaged) {
     // Pinch meter: thumb–index line + ring that fills as the pinch closes.
     const fill = Number.isFinite(v.pinchRatio) ? Math.max(0, Math.min(1, (1.2 - v.pinchRatio) / (1.2 - C.pinchOn))) : 0;
@@ -199,7 +208,8 @@ async function main() {
       keys.cancel = false;
       if (rec.on) rec.frames.push(frame);
       for (const e of recognizer.step(frame)) {
-        if (e.type === "swipe") flash = { direction: e.direction, until: t + 500 };
+        const text = { swipe: e.direction === "right" ? "→" : "←", "double-tap": "double tap", chop: "✂ cut" }[e.type];
+        if (text) flash = { text, until: t + 600 };
         sinkFn(e);
       }
       const v = recognizer.view();

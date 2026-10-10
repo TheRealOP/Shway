@@ -18,7 +18,7 @@
  *   fine?: boolean,      // fine (frame-step) mode modifier held
  *   cancel?: boolean,    // cancel pressed this frame
  * }} Frame
- * @typedef {{type: "engage" | "release" | "cancel" | "tracking-lost", t: number}
+ * @typedef {{type: "engage" | "release" | "cancel" | "tracking-lost" | "double-tap" | "chop", t: number}
  *   | {type: "shuttle", t: number, rate: number}
  *   | {type: "step", t: number, frames: number}
  *   | {type: "swipe", t: number, direction: "left" | "right"}} GestureEvent
@@ -42,9 +42,19 @@ export const DEFAULTS = {
   swipeCooldownMs: 700,
   quietAfterReleaseMs: 400, // no swipes right after an engagement ends
   mirrored: false, // true when landmarks come from a mirrored (selfie) image
+  tapOn: 0.3, // thumb–middle tip distance / palm length: closed below, open above tapOff
+  tapOff: 0.45,
+  tapMaxMs: 350, // a tap closes and opens within this
+  doubleTapGapMs: 400, // second tap must start within this of the first ending
+  chopMinDist: 0.2, // downward palm travel, fraction of image height, within swipeWindowMs
+  chopMaxOffAxis: 0.5, // max |dx| / dy
+  chopBladeMax: 0.6, // knuckle line's share facing the camera: below = hand edge-on (a blade)
+  fingerStraight: 1.5, // fingertip reaches this × its knuckle's distance from the wrist
+  chopCooldownMs: 1000,
 };
 
 const WRIST = 0, THUMB_TIP = 4, INDEX_MCP = 5, INDEX_TIP = 8, MIDDLE_MCP = 9, MIDDLE_TIP = 12, PINKY_MCP = 17;
+const FINGERS = [[5, 8], [9, 12], [13, 16], [17, 20]]; // [knuckle, tip]
 const DEG = 180 / Math.PI;
 
 /** @param {P3} a @param {P3} b */
@@ -80,6 +90,14 @@ function across(/** @type {P3[]} */ w, /** @type {P3} */ axis) {
   return l < 1e-9 ? null : scale(p, 1 / l);
 }
 
+/** Flat straight hand turned edge-on to the camera, like a blade. */
+function isBlade(/** @type {P3[]} */ w, /** @type {typeof DEFAULTS} */ c) {
+  const straight = FINGERS.every(([m, t]) => len(sub(w[t], w[WRIST])) > c.fingerStraight * len(sub(w[m], w[WRIST])));
+  const k = sub(w[PINKY_MCP], w[INDEX_MCP]);
+  const l = len(k);
+  return straight && l > 1e-9 && Math.hypot(k.x, k.y) / l < c.chopBladeMax;
+}
+
 /** Forearm-axis unit vector (wrist → middle knuckle). */
 function axisOf(/** @type {P3[]} */ w) {
   const a = sub(w[MIDDLE_MCP], w[WRIST]);
@@ -99,7 +117,11 @@ export function createRecognizer(config = {}) {
   let fine = false;
   let detent = 0;
   let cooldownUntil = -Infinity;
-  /** @type {{t: number, x: number, y: number}[]} */ let track = [];
+  /** @type {{t: number, x: number, y: number, blade: boolean}[]} */ let track = [];
+  let tapping = false; // thumb–middle closed
+  let tapStart = -Infinity;
+  let lastTap = -Infinity; // end of a single tap awaiting its pair
+  let blade = false; // hand currently chop-ready, for feedback
   let confidence = 0;
   let pinchRatio = Infinity; // last thumb–index / palm ratio, for feedback
 
@@ -129,6 +151,8 @@ export function createRecognizer(config = {}) {
     const t = f.t;
     lastT = t;
     const h = usableHand(f.hand, c.minScore);
+    let tapEnded = false;
+    blade = false;
     confidence = Number.isFinite(f.hand?.score) ? Number(f.hand?.score) : 0;
     if (h) {
       const palm = len(sub(h.world[MIDDLE_MCP], h.world[WRIST]));
@@ -136,8 +160,13 @@ export function createRecognizer(config = {}) {
       pinchRatio = pinch;
       const middle = len(sub(h.world[THUMB_TIP], h.world[MIDDLE_TIP])) / palm;
       pinching = pinching ? pinch < c.pinchOff : pinch < c.pinchOn && middle > pinch * c.pinchIndexOnly;
+      const wasTapping = tapping;
+      tapping = tapping ? middle < c.tapOff : middle < c.tapOn && pinch > middle * c.pinchIndexOnly;
+      if (tapping && !wasTapping) tapStart = t;
+      if (!tapping && wasTapping) tapEnded = true;
     } else {
       pinching = false;
+      tapping = false;
       pinchRatio = Infinity;
     }
     const engage = Boolean(f.key) || pinching;
@@ -180,6 +209,7 @@ export function createRecognizer(config = {}) {
         state = mag > 0 ? "Adjusting" : "Armed";
       }
       track = [];
+      lastTap = -Infinity;
       return out;
     }
 
@@ -207,14 +237,32 @@ export function createRecognizer(config = {}) {
     }
     if (!h || engage) {
       track = [];
+      lastTap = -Infinity;
       return out;
+    }
+    if (tapEnded) {
+      if (t - tapStart > c.tapMaxMs) lastTap = -Infinity; // a hold, not a tap
+      else if (tapStart - lastTap <= c.doubleTapGapMs) {
+        out.push({ type: "double-tap", t });
+        lastTap = -Infinity;
+      } else lastTap = t;
     }
     const w = h.image;
     const x = (w[WRIST].x + w[INDEX_MCP].x + w[PINKY_MCP].x) / 3;
     const y = (w[WRIST].y + w[INDEX_MCP].y + w[PINKY_MCP].y) / 3;
-    track.push({ t, x, y });
+    blade = isBlade(h.world, c);
+    track.push({ t, x, y, blade });
     track = track.filter((s) => s.t >= t - c.swipeWindowMs);
     const first = track[0];
+    if (t >= cooldownUntil && first && track.every((s) => s.blade)) {
+      const dx = x - first.x, dy = y - first.y; // image y grows downward
+      if (dy >= c.chopMinDist && Math.abs(dx) <= c.chopMaxOffAxis * dy) {
+        out.push({ type: "chop", t });
+        cooldownUntil = t + c.chopCooldownMs; // also blocks swipes from the follow-through
+        track = [];
+        return out;
+      }
+    }
     if (t >= cooldownUntil && first) {
       const dx = x - first.x, dy = y - first.y;
       if (Math.abs(dx) >= c.swipeMinDist && Math.abs(dy) <= c.swipeMaxOffAxis * Math.abs(dx)) {
@@ -229,7 +277,7 @@ export function createRecognizer(config = {}) {
   }
 
   /** UI snapshot: mode, effect and confidence must stay visible. */
-  const view = () => ({ state, rate, fine, angleDeg: angle, handedness, confidence, pinching, pinchRatio });
+  const view = () => ({ state, rate, fine, angleDeg: angle, handedness, confidence, pinching, pinchRatio, tapping, blade });
 
   return { step, view };
 }

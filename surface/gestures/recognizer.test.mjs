@@ -226,6 +226,60 @@ test("cancel stops and latches until released", () => {
   assert.equal(evs.length, i + 1);
 });
 
+// Thumb–middle taps: `pattern` is [closed?, ms] segments.
+const taps = (pattern, extra = {}) => {
+  const out = [];
+  let t = 0;
+  for (const [closed, ms] of pattern) {
+    for (const end = t + ms; t < end; t += 33) out.push({ t, hand: hand({ pinch: closed ? "middle" : false, ...extra }) });
+  }
+  return out;
+};
+
+test("thumb–middle double tap fires once", () => {
+  const evs = replay(taps([[0, 300], [1, 100], [0, 130], [1, 100], [0, 300]]));
+  assert.deepEqual(types(evs), ["double-tap"]);
+});
+
+test("single, slow, or held taps are not a double tap", () => {
+  assert.deepEqual(replay(taps([[0, 300], [1, 100], [0, 600]])), [], "single");
+  assert.deepEqual(replay(taps([[0, 300], [1, 100], [0, 800], [1, 100], [0, 300]])), [], "gap too long");
+  assert.deepEqual(replay(taps([[0, 300], [1, 600], [0, 130], [1, 100], [0, 300]])), [], "first was a hold");
+});
+
+test("a tap interrupted by tracking loss does not pair up", () => {
+  const evs = replay([
+    ...taps([[0, 300], [1, 100], [0, 66]]),
+    { t: 520, hand: null },
+    ...taps([[1, 100], [0, 300]]).map((f) => ({ ...f, t: f.t + 553 })),
+  ]);
+  assert.deepEqual(evs, []);
+});
+
+const chop = (t0, opts = {}) => frames(t0, 200, (p) => ({ hand: hand({ twist: 75, y: 0.3 + 0.3 * p, ...opts }) }));
+
+test("a downward edge-on straight-hand chop fires one cut", () => {
+  const evs = replay([...frames(0, 300, () => ({ hand: hand({ twist: 75, y: 0.3 }) })), ...chop(330)]);
+  assert.deepEqual(types(evs), ["chop"]);
+});
+
+test("chop cooldown: a bounce right after does not cut twice", () => {
+  const evs = replay([...chop(0), ...frames(833, 200, (p) => ({ hand: hand({ twist: 75, y: 0.3 + 0.3 * p }) }))]);
+  assert.deepEqual(types(evs), ["chop"]);
+});
+
+test("palm-facing drops, curled hands, slow moves and upward moves don't cut", () => {
+  assert.deepEqual(replay(chop(0, { twist: 0 })), [], "palm facing camera");
+  assert.deepEqual(replay(chop(0, { pinch: "fist" })), [], "fist");
+  assert.deepEqual(replay(frames(0, 2000, (p) => ({ hand: hand({ twist: 75, y: 0.3 + 0.3 * p }) }))), [], "slow");
+  assert.deepEqual(replay(frames(0, 200, (p) => ({ hand: hand({ twist: 75, y: 0.6 - 0.3 * p }) }))), [], "upward");
+});
+
+test("chop is suppressed while engaged", () => {
+  const evs = replay([{ t: 0, hand: hand({ twist: 75 }), key: true }, ...chop(33).map((f) => ({ ...f, key: true }))]);
+  assert.ok(!types(evs).includes("chop"));
+});
+
 test("hostile frames never throw and are ignored", () => {
   const r = createRecognizer();
   for (const f of [null, undefined, {}, { t: NaN }, { t: Infinity }, { t: "5" }, { t: 1, hand: 7 },

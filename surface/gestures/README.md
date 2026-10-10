@@ -7,7 +7,7 @@ Contract: [interactions](../../docs/wiki/interactions.md).
 | --- | --- |
 | `recognizer.mjs` | Pure, deterministic recognizer (`createRecognizer`, `replay`). Runs in Node and browsers, no build step. |
 | `recognizer.test.mjs` | Replay tests: `node --test surface/gestures/recognizer.test.mjs` (Node ≥ 22, no packages). |
-| `camera.html` | Camera harness: MediaPipe Hand Landmarker → recognizer → hand overlay (skeleton, pinch meter, twist dial with dead zone/speed bands/fine detents, swipe flash), latency, trace recorder (R). |
+| `camera.html` | Camera harness: MediaPipe Hand Landmarker → recognizer → hand overlay (skeleton, pinch meter, twist dial with dead zone/speed bands/fine detents, tap dot, chop-ready blade line, gesture flash), latency, trace recorder (R). |
 | `traces/*.json` | Recorded traces (none yet). Every file is replayed by the tests; names starting `rest` must emit nothing. |
 
 The directory sits outside `apps/` because `apps/*` is a Cargo workspace glob.
@@ -26,6 +26,13 @@ The FST's `Targeting / Preview / Committed` belong to edit proposals (DEV-92), n
   gives a net 0. Toggling modes stops the shuttle and never jumps.
 - **Swipe:** only in `Idle`, unpinched. Palm travel ≥ 18% of image width within 250 ms, mostly horizontal.
   700 ms cooldown, plus 400 ms quiet after any release. Slow drift and diagonal motion don't count.
+- **Double tap:** only in `Idle`. Two thumb–middle taps (tip distance / palm < 0.3, reopen > 0.45; thumb
+  1.5× nearer the middle tip than the index tip), each ≤ 350 ms closed, the second starting ≤ 400 ms
+  after the first ends. A hold or a tracking gap resets it.
+- **Chop:** only in `Idle`. All four fingers straight, the hand edge-on to the camera (a blade), with
+  palm travel ≥ 20% of image height downward within 250 ms, mostly vertical. Every sample in the window
+  must be blade-shaped. 1 s cooldown, which also blocks swipes. Palm-facing drops, curled hands,
+  slow or upward moves don't count.
 - **Loss:** no hand, confidence < 0.6, malformed/non-finite landmarks, or a handedness flip while
   engaged → `shuttle 0` + `tracking-lost`. The same for Esc → `cancel`. Control stays latched until
   engagement is released, then needs a fresh engage (new neutral).
@@ -37,7 +44,7 @@ The FST's `Targeting / Preview / Committed` belong to edit proposals (DEV-92), n
 import { createRecognizer } from "./recognizer.mjs";
 const r = createRecognizer(/* optional overrides of DEFAULTS */);
 for (const e of r.step(frame)) adapter(e);   // frame: {t, hand, key, fine, cancel}
-r.view();  // {state, rate, fine, angleDeg, handedness, confidence, pinching} for on-screen feedback
+r.view();  // {state, rate, fine, angleDeg, handedness, confidence, pinching, pinchRatio, tapping, blade} for on-screen feedback
 ```
 
 `camera.html` exposes `window.shwayGestures.setSink(fn)` to replace its log sink.
@@ -50,6 +57,8 @@ r.view();  // {state, rate, fine, angleDeg, handedness, confidence, pinching} fo
 | `release` | Done; keep the position | none (stop already sent) |
 | `cancel` | Restore the engage-time playhead | `playhead.set {time}` |
 | `tracking-lost` | Paused; show it; wait for re-engagement | none (stop already sent) |
+| `double-tap` | Thumb–middle double tap | Suggested: play/pause, `ui.playback {action:"toggle"}` |
+| `chop` | Cut at the playhead (an edit: one undo step) | `sequence.addEdit` (Cmd+K; `time` defaults to the playhead) |
 | `swipe {direction}` | One contextual navigation (user's left/right) | e.g. `playhead.nextEdit` / `prevEdit`, or next/previous take (context is the adapter's) |
 
 Those method and command names exist in `crates/ui-egui/src/control.rs` and `crates/engine/src/commands.rs`.
