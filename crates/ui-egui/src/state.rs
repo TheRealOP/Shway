@@ -516,6 +516,9 @@ pub struct UiState {
     /// Media Browser view state (tree, path field, Edit Columns…). See `panels::media_browser`.
     #[serde(default)]
     pub media_browser: crate::panels::media_browser::MediaBrowserUi,
+    /// Shway Assistant panel: the conversation, proposed edit and draft. See `panels::assistant`.
+    #[serde(default)]
+    pub assistant: crate::panels::assistant::AssistantUi,
 }
 
 /// An open Edit / Clip / File menu dialog: the engine command it runs on OK and the parameters
@@ -913,6 +916,7 @@ impl Default for UiState {
             keys: Default::default(),
             project_panel: Default::default(),
             media_browser: Default::default(),
+            assistant: Default::default(),
         }
     }
 }

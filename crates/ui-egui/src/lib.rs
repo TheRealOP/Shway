@@ -276,6 +276,8 @@ pub struct FilmcraftApp {
     pub shortcut_editor: panels::shortcuts_dialog::EditorState,
     pub toast: Option<(String, f64)>,
     pub tl: panels::timeline::TlState,
+    /// Assistant panel requests in flight (its conversation is `ui.assistant`).
+    pub assistant: panels::assistant::Client,
     /// Commands from outside the UI (native menu bar), invoked on the UI thread.
     pub command_inbox: Option<Receiver<String>>,
     /// GPU compositor (when running on wgpu): device state + compositor + the egui texture it feeds.
@@ -461,6 +463,7 @@ impl FilmcraftApp {
             shortcut_editor: Default::default(),
             toast: None,
             tl: Default::default(),
+            assistant: Default::default(),
             command_inbox: None,
             gpu: None,
             watched_render: None,
@@ -660,6 +663,7 @@ impl FilmcraftApp {
         if !self.ui.dock.contains(p) {
             let near = match p {
                 PanelKind::LumetriColor | PanelKind::EssentialGraphics | PanelKind::EssentialSound | PanelKind::Properties => PanelKind::Program,
+                PanelKind::Assistant => PanelKind::Properties,
                 PanelKind::Source
                 | PanelKind::EffectControls
                 | PanelKind::AudioClipMixer

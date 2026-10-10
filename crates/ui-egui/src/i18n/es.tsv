@@ -3480,3 +3480,16 @@
 	New Sequence	Nueva secuencia
 	Tracks	Pistas
 	tracks	pistas
+	Assistant	Asistente
+	The assistant is available in the desktop app.	El asistente está disponible en la aplicación de escritorio.
+	Ask the assistant to edit your video…	Pide al asistente que edite tu video…
+	Send	Enviar
+	Accept	Aceptar
+	Reject	Rechazar
+	Thinking…	Pensando…
+	Ask for an edit, for example “remove the silences”.	Pide una edición, por ejemplo «quita los silencios».
+	You	Tú
+	Assistant service not running: start it with `node shway/assistant.mjs`	El servicio del asistente no está en marcha: inícialo con `node shway/assistant.mjs`
+	Send to Assistant	Enviar al asistente
+	Accept Assistant Edit	Aceptar la edición del asistente
+	Reject Assistant Edit	Rechazar la edición del asistente
