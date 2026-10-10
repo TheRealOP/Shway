@@ -45,10 +45,11 @@
 <ol id="list"></ol>
 <script type="module">
 import { createVoice } from "./utterance.mjs";
+import { openMic, createCapture } from "./mic.mjs";
 
 const $ = (id) => document.getElementById(id);
 const voice = createVoice();
-let stream = null, recorder = null;
+let stream = null;
 // Interaction context: the editor adapter replaces this getter (selection, target, playhead, gesture state).
 let getContext = () => ({ selection: [], target: null, playhead: null, gesture: null });
 // Utterances cross the integration boundary here. DEV-92's proposal flow replaces this sink.
@@ -75,30 +76,10 @@ function render() {
   $("ctx").textContent = JSON.stringify(getContext());
 }
 
-// One MediaRecorder per utterance, started only on an explicit push-to-talk start.
+const capture = createCapture(voice, { stream: () => stream, onUtterance: (u) => { addToList(u); sink(u); } });
 function handle(e) {
   if (!e) return;
-  if (e.type === "recording") {
-    if (!stream) { voice.cancel(performance.now()); $("notice").textContent = "No microphone: nothing is recorded."; render(); return; }
-    const chunks = [];
-    const r = new MediaRecorder(stream);
-    r.ondataavailable = (ev) => { if (ev.data.size) chunks.push(ev.data); };
-    r.onstop = () => {
-      const done = r.result; // set by the stop/cancel below
-      if (done?.type !== "utterance") return; // rejected or cancelled: audio is discarded
-      done.utterance.audio = new Blob(chunks, { type: r.mimeType });
-      addToList(done.utterance);
-      sink(done.utterance);
-    };
-    r.start();
-    recorder = r;
-    $("notice").textContent = "";
-  } else {
-    // Only an event that ended the recording stops the recorder (a rejected double start must not).
-    if (recorder && !voice.view().recording) { recorder.result = e; if (recorder.state !== "inactive") recorder.stop(); recorder = null; }
-    if (e.type === "rejected") $("notice").textContent = `Not kept: ${e.reason}`;
-    if (e.type === "cancelled") $("notice").textContent = `Cancelled ${e.id}`;
-  }
+  $("notice").textContent = capture(e);
   render();
 }
 
@@ -156,19 +137,9 @@ function frame() {
 async function main() {
   render();
   requestAnimationFrame(frame);
-  if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
-    $("err").textContent = "This browser has no getUserMedia/MediaRecorder (or the page is not on localhost/https).";
-    return;
-  }
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
-  } catch (e) {
-    const denied = e.name === "NotAllowedError" || e.name === "SecurityError";
-    $("err").textContent = denied
-      ? `Microphone permission denied (${e.name}). Allow microphone access for this page and reload.`
-      : `Microphone unavailable: ${e.name}: ${e.message}`;
-    return;
-  }
+  const mic = await openMic();
+  if (mic.error) { $("err").textContent = mic.error; return; }
+  stream = mic.stream;
   const ac = new AudioContext();
   analyser = ac.createAnalyser();
   analyser.fftSize = buf.length;
