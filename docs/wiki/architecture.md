@@ -70,6 +70,24 @@ uses one normal engine edit; cancellation drops the candidate and preserves undo
 work. A visible candidate frame can be presented separately from the accepted timeline. Playback
 and export continue to use the accepted project; full candidate playback is not implemented.
 
+### First-cut assembly (DEV-90 engine slice)
+
+A `timeline.place` proposal step takes `ranges: [{item, sourceIn, sourceOut}]` (exact source ticks)
+and appends each, in order, after everything already in the active sequence: the real
+`timeline.place` command overwrites at the sequence end on V1 with linked audio on A1, inside the
+staged session. Appending was chosen over creating a sequence because proposals are bound to the
+active sequence and `file.newSequence` is a separate project edit; an empty new sequence is simply the
+case where appending starts at zero, and existing clips are never touched. Each range must be on finite,
+online media, inside the source, non-empty and on the sequence frame grid (rejected, never silently
+snapped; the adapter's `alignRange` widens ranges to the grid explicitly). Ranges count toward the 32-reference cap.
+Every placed clip is rechecked for lock state, exact range and linked A/V sync. The whole assembly
+is one preview, one commit and one undo step; cancel leaves the project untouched.
+
+Verified: Rust unit tests in `crates/engine/src/proposals/tests.rs` (three ranges from two sources
+into an empty sequence, append after existing content, cancel, hostile/offline/locked/stale cases)
+and adapter tests. Not yet verified: the browser integration run and playback/export of an
+assembled cut with real creator footage.
+
 See [verification evidence](foundation-evidence.md) for checks actually completed. Gesture/voice
 integration and real creator footage remain separate acceptance work.
 
