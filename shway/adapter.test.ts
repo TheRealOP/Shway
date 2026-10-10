@@ -227,6 +227,34 @@ test("assembly sends one exact timeline.place step and rejects hostile ranges be
   assert.equal(calls.length, before);
 });
 
+test("remove and move steps pass exact explicit IDs and reject hostile shapes before dispatch", async () => {
+  const {transport, calls} = fixture();
+  const adapter = await ShwayAdapter.connect(transport);
+  const remove = {command: "timeline.remove", params: {clips: [21, 23]}} as const;
+  const move = {command: "timeline.move", params: {clip: 23, anchor: 21, position: "before"}} as const;
+  const trim = proposal().steps[0];
+  await adapter.preview({...proposal(), steps: [move, trim, remove]});
+  assert.deepEqual(calls.find(call => call.command === "proposal.preview")?.params.steps, [move, trim, remove]);
+  const before = calls.length;
+  const steps = (step: unknown) => ({...proposal(), steps: [step]}) as unknown as EditProposal;
+  for (const bad of [
+    {command: "timeline.remove", params: {clips: []}},
+    {command: "timeline.remove", params: {clips: [21, 21]}},
+    {command: "timeline.remove", params: {clips: new Array(33).fill(0).map((_, i) => i + 1)}},
+    {command: "timeline.remove", params: {clips: [0]}},
+    {command: "timeline.remove", params: {clips: [21], ripple: false}},
+    {command: "timeline.remove", params: {clip: 21}},
+    {command: "timeline.move", params: {clip: 21, anchor: 21, position: "after"}},
+    {command: "timeline.move", params: {clip: 21, anchor: 23, position: "over"}},
+    {command: "timeline.move", params: {clip: 21, anchor: 1.5, position: "after"}},
+    {command: "timeline.move", params: {clip: 21, position: "after"}},
+    {command: "timeline.move", params: {clip: 21, anchor: 23, position: "after", time: 0}},
+  ]) await assert.rejects(adapter.preview(steps(bad)), code("invalid"));
+  // Each move references two clips toward the 32-target bound.
+  await assert.rejects(adapter.preview({...proposal(), steps: [...new Array(15).fill(move), {command: "timeline.remove", params: {clips: [21, 23, 24]}}]}), code("invalid"));
+  assert.equal(calls.length, before);
+});
+
 test("alignRange widens word-boundary ticks to the engine's exact frame grid", () => {
   const f24 = 10584000000, fps24 = {num: 24, den: 1};
   // 0.9 s = 21.6 frames: In floors to 21, Out ceils to 22.

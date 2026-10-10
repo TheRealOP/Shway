@@ -23,7 +23,9 @@ Connection discovers command IDs and rejects engines that lack the proposal boun
 contains human-readable parameter descriptions; it is not itself a strict JSON schema. This adapter
 and Rust's typed deserializer validate the allowlisted proposal shape.
 
-The supported proposal steps are `timeline.trim`, `clip.replaceFromBin` and `timeline.place`. Proposals explicitly name
+The supported proposal steps are `timeline.trim`, `clip.replaceFromBin`, `timeline.place`,
+`timeline.remove` (`{clips}`: ripple delete with linked partners) and `timeline.move`
+(`{clip, anchor, position: "before"|"after"}`: rearrange on one track; counts as two references). Proposals explicitly name
 expected revision, active sequence, target clips, source IDs, and frame deltas. Requests are limited
 to 16 steps, 32 total explicit target references, and labels of at most 120 UTF-8 bytes. Rust stages them in a
 disposable session. `previewFrame` returns bounded RGBA pixels from that candidate without changing
@@ -336,23 +338,24 @@ node --test shway/assistant.test.mjs                    # fake editor (TCP) + fa
    `trim{clip, edge, direction, amount, unit}`, `move{clip, target, position}` and
    `replace_take{correction}`.
 4. Validation rejects any other field, unknown clip ids, amounts that are not positive, trims past
-   the clip length or the media handles, and moves onto the same clip. An invalid answer gets one
+   the clip length or the media handles, and moves onto the same clip, its linked partner or another
+   track. An invalid answer gets one
    retry that quotes the error. If that also fails, the creator gets a polite "couldn't" reply.
 5. Code maps the checked fields to engine params. The model never names commands, files or raw params.
 6. Edits go only through `proposal.preview` with `expectedRevision`. A trim is a ripple
-   `timeline.trim` of `round(seconds × fps)` frames. `replace_take` calls `proposeReplacement` on
+   `timeline.trim` of `round(seconds × fps)` frames. A remove is a `timeline.remove {clips}` step
+   (ripple delete; linked audio goes with its video). A move is a `timeline.move {clip, anchor:
+   target, position}` step (the clip plays right before/after the target; the rest ripples, length
+   unchanged). If the engine refuses a step (sync-locked music under the cut, a gap that would also
+   close, locked tracks), the creator gets its reason and nothing changes. `replace_take` calls `proposeReplacement` on
    the selected clip with the `--takes` index. It uses Jev when the proxy reports `jev: true`, and
    Gemini otherwise. Nothing commits until `/chat/accept`.
 7. A stale revision, at preview or at accept, cancels the preview and asks the creator to retry.
 
 **Not supported yet:**
 
-- **`remove` and `move`:** `proposal.preview` only has `timeline.trim`, `clip.replaceFromBin` and
-  `timeline.place` steps (`crates/engine/src/proposals.rs`). A trim cannot take a clip to zero
-  length, and `place` only appends. The assistant validates these requests, names the clips it
-  understood, and replies that it can't do them safely yet. Nothing changes, and it does not bypass
-  the preview with direct edits. Supporting them needs a ripple-delete step and a move step in the
-  proposal engine.
+- **Moving several clips at once:** a move names one clip (with its links); "move the Chili's part"
+  where that part is two clips moves only the one the model picks.
 - **Restarts:** a pending preview is not cancelled when the service restarts. The engine then
   refuses new previews until that token is cancelled or the app restarts.
 
@@ -382,3 +385,20 @@ Results:
 Every Gemini answer in the run passed validation on the first try. An earlier flat schema failed:
 the model dropped or invented trim fields, which is why each action now has a nested object.
 The `replace_take` path with a real take index was not exercised live; its unit tests are in `replace.test.ts`.
+
+**Remove/move verified 2026-10-10 (live).** Same setup on a fresh copy: `filmcraft --control 9879`,
+proxy `:8799`, assistant `:8797`, 20 transcripts imported (undo 20). After load the sequence was
+37060 frames, 53 linked pairs, no gaps. The "Unsupported reply" and "asked which single clip" rows
+above predate the remove and move steps.
+
+| Message | Latency | Result |
+|---|---|---|
+| "remove the Chili's part" | 90.2 s | Gemini proxy timed out; 502, nothing changed |
+| The same again | 40.7 s | Previewed `Remove C5515.MP4, C5515.MP4`: clips 104, 107 and their audio 105, 108; `closed` 503 frames; history unchanged |
+| Accept | 0.01 s | Undo 20 → 21; 37060 → 36557 frames (−503); 51 V1/51 A1, all linked and aligned, no gaps |
+| Undo / redo / undo | – | Undo restored 37060 frames and 53 pairs; redo gave the same sequence byte-for-byte as the accept; undo again was identical to the first undo |
+| "move the Chili's part to the very start of the video" | 26.4 s | Previewed `Move C5515.MP4 before C5500.MP4` (clips 104 and 105 to 0) |
+| Reject | 0.01 s | Discarded; sequence identical to before; undo still 20 |
+| "move the second clip so it plays after the fourth clip" | 5.3 s | Previewed |
+| Accept | 0.02 s | Undo 20 → 21; V1 order 29, 32, 35, 38 → 29, 35, 38, 32; clip 41 onward unchanged; 37060 frames; linked, aligned, no gaps |
+| Undo | – | Sequence identical to before the move |

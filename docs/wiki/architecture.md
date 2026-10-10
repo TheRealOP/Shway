@@ -72,6 +72,19 @@ uses one normal engine edit; cancellation drops the candidate and preserves undo
 work. A visible candidate frame can be presented separately from the accepted timeline. Playback
 and export continue to use the accepted project; full candidate playback is not implemented.
 
+### Remove and move steps
+
+`timeline.remove {clips}` runs the engine's own `edit.rippleDelete` in the staged session: linked
+partners go too, later clips (and unlocked sync-locked tracks) close the gap, sequence markers
+ripple per the user's setting, and the step fails if no gap can close. `timeline.move {clip, anchor,
+position}` rearranges a clip (with its links) to play immediately before/after another clip on the
+same track: an insert-mode `timeline.move` to the anchor's edge, then `sequence.closeGap` on the
+hole it left (markers unchanged, since length is unchanged). Before running, the proposal computes the
+exact expected start of every clip; any difference (a sync-locked track whose material would split,
+a pre-existing gap that would also close, a non-sync-locked partner track) rejects the step instead
+of desyncing. Both reuse `targets()` (explicit, unique, unlocked, synced A/V, ≤ 32) and count toward
+the reference cap (a move counts clip + anchor). Tests: `crates/engine/src/proposals/tests.rs`.
+
 ### First-cut assembly (DEV-90 engine slice)
 
 A `timeline.place` proposal step takes `ranges: [{item, sourceIn, sourceOut}]` (exact source ticks)

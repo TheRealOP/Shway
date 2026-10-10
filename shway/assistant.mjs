@@ -80,6 +80,8 @@ For anything else (effects, color, titles, export, adding media) use answer and 
 
 const sec = (t) => Math.round((t / TPS) * 100) / 100;
 const cut = (s, n) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
+// Proposal labels are at most 120 UTF-8 bytes; file names may be long or non-ASCII.
+export const fit = (s) => { for (s = cut(s, 120); Buffer.byteLength(s) > 120;) s = cut(s, s.length - 1); return s; };
 
 /** What the model sees, and what validation checks against. Built from one consistent inspection. */
 async function snapshot(adapter, transport) {
@@ -145,6 +147,7 @@ export function validateAction(raw, snap) {
     case "move": {
       const c = clip(raw.clip, "clip"), t = clip(raw.target, "target");
       if (c.clip === t.clip || (c.link != null && c.link === t.link)) throw new UserError("target must be a different clip");
+      if (c.track !== t.track) throw new UserError(`target must be on the same track as clip ${c.clip} (${c.track})`);
       if (!["before", "after"].includes(raw.position)) throw new UserError("position must be before or after");
       return { action: "move", reply, clip: c.clip, target: t.clip, position: raw.position };
     }
@@ -206,26 +209,29 @@ export function createAssistant({ editor = "127.0.0.1:9876", proxy = "http://127
     const snap = await snapshot(a, transport);
     const act = await interpret(message, snap);
     const name = (id) => cut(String(snap.clips.get(id)?.name || `clip ${id}`), 40);
+    // Code maps the validated action to one proposal step; the model never names engine commands.
+    const stage = async (label, step) => {
+      let preview;
+      try {
+        preview = await a.preview({ expectedRevision: snap.project.revision, sequence: snap.sequence.id, label: fit(label), steps: [step] });
+      } catch (e) {
+        if (stale(e) || !/edit proposal|invalid/i.test(String(e?.message))) throw e;
+        return `The editor refused that ${act.action} (${e.message}). Nothing changed.`;
+      }
+      pending = { token: preview.token, label: preview.label };
+      return `${act.reply} Preview ready: accept to apply it, or reject.`;
+    };
     switch (act.action) {
       case "answer": return act.reply;
       case "remove":
-        // ponytail: proposals have no delete step (crates/engine/src/proposals.rs: trim, replaceFromBin, place only).
-        return `I understood: remove ${act.clips.map(name).join(", ")}. Removing clips isn't supported by the preview boundary yet, so I can't do it safely. Nothing changed.`;
+        return stage(`Remove ${act.clips.map(name).join(", ")}`, { command: "timeline.remove", params: { clips: act.clips } });
       case "move":
-        return `I understood: move ${name(act.clip)} ${act.position} ${name(act.target)}. Moving clips isn't supported by the preview boundary yet, so I can't do it safely. Nothing changed.`;
+        return stage(`Move ${name(act.clip)} ${act.position} ${name(act.target)}`,
+          { command: "timeline.move", params: { clip: act.clip, anchor: act.target, position: act.position } });
       case "trim": {
         const c = snap.clips.get(act.clip);
-        const label = `Trim ${act.edge === "out" ? "end" : "start"} of ${name(act.clip)} (${act.direction} ${act.frames} frames)`;
-        let preview;
-        try {
-          preview = await a.preview({ expectedRevision: snap.project.revision, sequence: snap.sequence.id, label,
-            steps: [{ command: "timeline.trim", params: { clip: c.clip, source: c.item, edge: act.edge, mode: "ripple", deltaFrames: act.deltaFrames } }] });
-        } catch (e) {
-          if (stale(e) || !/edit proposal|invalid/i.test(String(e?.message))) throw e;
-          return `The editor refused that trim (${e.message}). Nothing changed.`;
-        }
-        pending = { token: preview.token, label: preview.label };
-        return `${act.reply} Preview ready: accept to apply it, or reject.`;
+        return stage(`Trim ${act.edge === "out" ? "end" : "start"} of ${name(act.clip)} (${act.direction} ${act.frames} frames)`,
+          { command: "timeline.trim", params: { clip: c.clip, source: c.item, edge: act.edge, mode: "ripple", deltaFrames: act.deltaFrames } });
       }
       case "replace_take": {
         if (!Array.isArray(takes) || !takes.length) return "There is no take index for this project yet, so I can't swap takes. Nothing changed.";
