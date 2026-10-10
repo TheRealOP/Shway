@@ -45,10 +45,10 @@ export function readBrief(/** @type {Record<string, unknown>} */ f) {
  * The one pending proposal and its Accept / Reject / Undo, through the adapter. Calls run one at a
  * time; a newer proposal discards the older one. onChange({pending, status, busy}) after every change.
  * @param {{commit(t: number): Promise<{revision: number, label: string}>, cancel(t: number): Promise<unknown>, undo(): Promise<{undone: string}>}} adapter
- * @param {(s: {pending: {token: number, label: string} | null, status: string, busy: boolean}) => void} onChange
+ * @param {(s: {pending: {token: number, label: string, source: string} | null, status: string, busy: boolean}) => void} onChange
  */
 export function createProposals(adapter, onChange) {
-  /** @type {{token: number, label: string} | null} */ let pending = null;
+  /** @type {{token: number, label: string, source: string} | null} */ let pending = null;
   let status = "";
   let busy = false;
   const emit = () => onChange({ pending, status, busy });
@@ -61,11 +61,13 @@ export function createProposals(adapter, onChange) {
   };
   return {
     get pending() { return pending; },
-    /** @param {{token: number, label?: string}} p */
+    /** source "tribe" = a suggestion: it never displaces a pending proposal, and only the creator accepts it.
+     * @param {{token: number, label?: string, source?: string}} p */
     show: (p) => run(async () => {
       if (!Number.isSafeInteger(p?.token)) throw new Error("proposal has no preview token");
+      if (p.source === "tribe" && pending) { await adapter.cancel(p.token).catch(() => {}); return "Suggestion skipped: a proposal is already pending."; }
       const old = pending;
-      pending = { token: p.token, label: String(p.label ?? "Proposal") };
+      pending = { token: p.token, label: String(p.label ?? "Proposal"), source: p.source ?? "creator" };
       if (old) await adapter.cancel(old.token).catch(() => {}); // already gone is fine
       return ""; // the bar's title already names it
     }),
@@ -86,6 +88,69 @@ export function createProposals(adapter, onChange) {
     /** @param {string} s */
     note: (s) => { status = s; emit(); },
   };
+}
+
+// ---- TRIBE comparison events ("virtual gestures"). Contract: docs/wiki/inference.md#comparison-events.
+// A TRIBE event only ever becomes a suggestion; the creator accepts it like any other preview.
+
+const TEXT = (/** @type {unknown} */ v) => typeof v === "string" && v.length > 0 && v.length <= 128;
+const INT = (/** @type {unknown} */ v, min = 0) => typeof v === "number" && Number.isSafeInteger(v) && v >= min;
+
+/**
+ * @typedef {{version: 1, id: string, kind: "below-reference" | "above-reference", sequence: number, revision: number,
+ *   renderId: string, range: {start: number, end: number}, score: number, reference: string, model: string}} TribeEvent
+ * @returns {TribeEvent | null} the event's contract fields, or null when malformed. Unknown fields are ignored.
+ */
+export function readTribeEvent(/** @type {any} */ v) {
+  if (!v || typeof v !== "object" || v.version !== 1 || !TEXT(v.id) || !["below-reference", "above-reference"].includes(v.kind)) return null;
+  if (!INT(v.sequence, 1) || !INT(v.revision) || !TEXT(v.renderId) || !TEXT(v.reference) || !TEXT(v.model)) return null;
+  const r = v.range;
+  if (!r || !INT(r.start) || !INT(r.end) || r.end <= r.start) return null;
+  if (typeof v.score !== "number" || !(v.score >= 0 && v.score <= 1)) return null;
+  return { version: 1, id: v.id, kind: v.kind, sequence: v.sequence, revision: v.revision, renderId: v.renderId,
+    range: { start: r.start, end: r.end }, score: v.score, reference: v.reference, model: v.model };
+}
+
+/**
+ * When a TRIBE event may become a suggestion: well-formed, made from the timeline as it is now, not seen
+ * before, and the creator is neither reviewing a proposal nor mid-gesture/utterance (their input wins).
+ * A "busy" drop is not remembered, so the same event can be offered again later.
+ */
+export function createTribeGate() {
+  const seen = new Set();
+  return {
+    /** @param {unknown} raw @param {{sequence: number | null | undefined, revision: number, pending: boolean, active: boolean}} now
+     * @returns {{event: TribeEvent} | {drop: "malformed" | "stale" | "duplicate" | "busy"}} */
+    check(raw, now) {
+      const e = readTribeEvent(raw);
+      if (!e) return { drop: "malformed" };
+      if (e.sequence !== now.sequence || e.revision !== now.revision) return { drop: "stale" };
+      const same = `${e.renderId} ${e.range.start} ${e.range.end}`;
+      if (seen.has(e.id) || seen.has(same)) return { drop: "duplicate" };
+      if (now.pending || now.active) return { drop: "busy" };
+      if (seen.size > 1000) seen.clear(); // ponytail: bounded memory; a very old event replayed after this is stale by revision anyway
+      seen.add(e.id); seen.add(same);
+      return { event: e };
+    },
+  };
+}
+
+/** The top video clip under the middle of the range (sequence ticks), or null. */
+export function clipAt(/** @type {{video: {items: {clip: number, start: number, duration: number}[]}[]}} */ sequence, /** @type {{start: number, end: number}} */ range) {
+  const mid = range.start + Math.floor((range.end - range.start) / 2);
+  for (const track of [...sequence.video].reverse()) {
+    const c = track.items.find((c) => c.start <= mid && mid < c.start + c.duration);
+    if (c) return c.clip;
+  }
+  return null;
+}
+
+/** What the decider is told. Average-viewer prediction, never a measurement of the creator or "engagement". */
+export function tribeCorrection(/** @type {TribeEvent} */ e, feeling = "") {
+  return `The predicted average-viewer response for this line (TRIBE model; not a measurement of anyone, not engagement or quality) ` +
+    `is ${e.kind === "below-reference" ? "below" : "above"} the creator's approved reference pattern. ` +
+    `Choose another take of the same line only if it plausibly fits the brief${feeling ? ` (feeling: ${JSON.stringify(feeling)})` : ""} better; ` +
+    `if nothing clearly fits, answer -1.`;
 }
 
 /** Dynamically imports a panel hook module; null with a reason if it isn't built yet. */
