@@ -90,6 +90,9 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     uic!("multicam.editCamerasDialog", "Edit Cameras…", [], None),
     uic!("voiceover.recordToggle", "Voice-over Record", [], None),
     uic!("voiceover.settingsDialog", "Voice-Over Record Settings…", [], None),
+    uic!("assistant.send", "Send to Assistant", [], None),
+    uic!("assistant.accept", "Accept Assistant Edit", [], None),
+    uic!("assistant.reject", "Reject Assistant Edit", [], None),
     uic!("view.theme.dark", "Darkest", ["View", "Appearance"], None),
     uic!("view.theme.medium", "Medium", ["View", "Appearance"], None),
     uic!("view.theme.light", "Light", ["View", "Appearance"], None),
@@ -235,6 +238,9 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut params:
         return r;
     }
     if let Some(r) = crate::panels::voiceover::route(app, ctx, id, &params) {
+        return r;
+    }
+    if let Some(r) = crate::panels::assistant::route(app, ctx, id, &params) {
         return r;
     }
     if let Some(r) = crate::panels::clip_dialogs::route(app, id, &params) {
