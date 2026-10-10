@@ -1,7 +1,7 @@
 // Transport-boundary tests; actual preview/commit/cancel/undo belongs to browser integration.
 import test from "node:test";
 import assert from "node:assert/strict";
-import {ShwayAdapter, AdapterError} from "./adapter.ts";
+import {ShwayAdapter, AdapterError, alignRange} from "./adapter.ts";
 import type {EditProposal, FilmcraftTransport} from "./adapter.ts";
 
 const capabilities = ["project.inspect", "sequence.inspect", "timeline.select", "playhead.set", "edit.undo", "file.exportMedia", "jobs.list", "proposal.preview", "proposal.inspect", "proposal.cancel", "proposal.commit", "proposal.render"];
@@ -207,6 +207,41 @@ test("preview lifecycle uses token-scoped engine commands and returns undo label
   assert.equal("execute" in adapter, false);
 });
 
+test("assembly sends one exact timeline.place step and rejects hostile ranges before dispatch", async () => {
+  const {transport, calls} = fixture();
+  const adapter = await ShwayAdapter.connect(transport);
+  const ranges = [{item: 31, sourceIn: 0, sourceOut: 42336000000}, {item: 32, sourceIn: 84672000000, sourceOut: 127008000000}];
+  const input = {expectedRevision: 4, sequence: 7, label: "Shorten take", ranges};
+  const preview = adapter.assemble(input);
+  ranges[0].item = 99;
+  assert.equal((await preview).token, 9);
+  assert.deepEqual(calls.find(call => call.command === "proposal.preview")?.params, {expectedRevision: 4, sequence: 7, label: "Shorten take",
+    steps: [{command: "timeline.place", params: {ranges: [{item: 31, sourceIn: 0, sourceOut: 42336000000}, ranges[1]]}}]});
+  const before = calls.length;
+  const range = {item: 31, sourceIn: 0, sourceOut: 10};
+  for (const bad of [
+    [], new Array(33).fill(range), [{...range, sourceOut: 0}], [{...range, sourceIn: -1}], [{...range, sourceOut: 1.5}],
+    [{...range, sourceOut: Number.MAX_SAFE_INTEGER + 1}], [{...range, item: 0}], [{...range, seconds: 1}], [null],
+  ]) await assert.rejects(adapter.assemble({...input, ranges: bad as typeof ranges}), code("invalid"));
+  await assert.rejects(adapter.assemble({...input, autoplay: true} as typeof input), code("invalid"));
+  assert.equal(calls.length, before);
+});
+
+test("alignRange widens word-boundary ticks to the engine's exact frame grid", () => {
+  const f24 = 10584000000, fps24 = {num: 24, den: 1};
+  // 0.9 s = 21.6 frames: In floors to 21, Out ceils to 22.
+  assert.deepEqual(alignRange({item: 3, sourceIn: 228614400000, sourceOut: 228614400000 + 1}, fps24), {item: 3, sourceIn: 21 * f24, sourceOut: 22 * f24});
+  assert.deepEqual(alignRange({item: 3, sourceIn: 2 * f24, sourceOut: 5 * f24}, fps24), {item: 3, sourceIn: 2 * f24, sourceOut: 5 * f24});
+  // 29.97: frame 30 starts at ceil(30 * 254016000000 * 1001 / 30000); one tick later rounds out to frame 31.
+  const ntsc = {num: 30000, den: 1001};
+  assert.deepEqual(alignRange({item: 3, sourceIn: 254270016000, sourceOut: 254270016001}, ntsc), {item: 3, sourceIn: 254270016000, sourceOut: 254270016000 + 8475667200});
+  for (const [range, rate] of [
+    [{item: 3, sourceIn: -1, sourceOut: f24}, fps24], [{item: 3, sourceIn: 0, sourceOut: 1.5}, fps24], [{item: 0, sourceIn: 0, sourceOut: f24}, fps24],
+    [{item: 3, sourceIn: f24, sourceOut: f24}, fps24], [{item: 3, sourceIn: 0, sourceOut: f24}, {num: 0, den: 1}], [{item: 3, sourceIn: 0, sourceOut: f24}, {num: 24, den: 0}],
+    [{item: 3, sourceIn: 0, sourceOut: Number.MAX_SAFE_INTEGER}, fps24],
+  ] as const) assert.throws(() => alignRange(range, rate), code("invalid"));
+});
+
 test("export is constrained to H264/AAC and failed completed jobs retain error evidence", async () => {
   const {transport, calls} = fixture();
   const adapter = await ShwayAdapter.connect(transport);
@@ -218,4 +253,42 @@ test("export is constrained to H264/AAC and failed completed jobs retain error e
   const [job] = await adapter.jobs();
   assert.equal(job.finished, true);
   assert.deepEqual(job.result, {error: "Disk full"});
+});
+
+test("gesture transport maps to playback, step, seek, edit navigation and cut", async () => {
+  const {transport, calls} = fixture();
+  transport.commands = async () => [...capabilities, "playhead.step", "playhead.nextEdit", "playhead.prevEdit", "sequence.addEdit"].map(id => ({id}));
+  transport.request = async (method, params = {}) => {calls.push({command: method, params}); return method === "ui.inspect" ? {playhead: 12345} : {};};
+  const adapter = await ShwayAdapter.connect(transport);
+  await adapter.shuttle(-2);
+  await adapter.togglePlay();
+  await adapter.stepFrames(-3);
+  assert.equal(await adapter.playhead(), 12345);
+  await adapter.seekTicks(12345);
+  await adapter.nextEdit();
+  await adapter.prevEdit();
+  await adapter.cut();
+  assert.deepEqual(calls.map(c => [c.command, c.params]), [
+    ["ui.playback", {action: "play", speed: -2}], ["ui.playback", {action: "toggle"}], ["playhead.step", {frames: -3}],
+    ["ui.inspect", {}], ["playhead.set", {time: 12345}], ["playhead.nextEdit", {}], ["playhead.prevEdit", {}], ["sequence.addEdit", {}],
+  ]);
+});
+
+test("hostile gesture values never reach the engine", async () => {
+  const {transport, calls} = fixture();
+  transport.commands = async () => [...capabilities, "playhead.step"].map(id => ({id}));
+  const adapter = await ShwayAdapter.connect(transport);
+  for (const speed of [0, NaN, Infinity, -9, 8.5, "2" as unknown as number]) assert.throws(() => adapter.shuttle(speed), code("invalid"));
+  for (const frames of [0, 1001, -1001, 1.5, NaN]) assert.throws(() => adapter.stepFrames(frames), code("invalid"));
+  for (const time of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) assert.throws(() => adapter.seekTicks(time), code("invalid"));
+  assert.equal(calls.length, 0);
+  transport.request = async () => ({playhead: -5});
+  await assert.rejects(adapter.playhead(), code("invalid"));
+});
+
+test("cut and edit navigation require the engine to offer them", async () => {
+  const {transport} = fixture();
+  const adapter = await ShwayAdapter.connect(transport);
+  assert.throws(() => adapter.cut(), code("capability"));
+  assert.throws(() => adapter.nextEdit(), code("capability"));
 });

@@ -1,5 +1,7 @@
 // Thin browser boundary over FilmCraft's authoritative Rust project and proposal commands.
 // Edit times cross this boundary only as safe integer ticks or integer frame deltas.
+import {parseTranscript, TranscriptError} from "./takes.ts";
+import type {SourceTranscript, TranscriptInput} from "./takes.ts";
 export interface FilmcraftTransport {
   commands(): Promise<unknown>;
   execute(command: string, params?: Record<string, unknown>): Promise<unknown>;
@@ -15,12 +17,20 @@ export interface ReplaceStep {
   command: "clip.replaceFromBin";
   params: {clips: number[]; item: number; keepSourceIn?: boolean};
 }
+// Source ticks on the active sequence's frame grid; use alignRange() to round explicitly.
+export interface SourceRange {item: number; sourceIn: number; sourceOut: number}
+export interface PlaceStep {
+  command: "timeline.place";
+  params: {ranges: SourceRange[]};
+}
 export interface EditProposal {
   expectedRevision: number;
   sequence: number;
   label: string;
-  steps: (TrimStep | ReplaceStep)[];
+  steps: (TrimStep | ReplaceStep | PlaceStep)[];
 }
+export interface FrameRate {num: number; den: number}
+const TICKS_PER_SECOND = 254016000000n;
 export interface ProjectInspection {
   revision: number;
   activeSequence: number | null;
@@ -45,6 +55,7 @@ export interface SequenceInspection {
   duration: number;
   video: TrackInspection[];
   audio: TrackInspection[];
+  settings?: {frame_rate?: FrameRate; [field: string]: unknown};
   [field: string]: unknown;
 }
 export interface ProposalPreview {
@@ -127,7 +138,7 @@ function proposalInput(value: EditProposal): EditProposal {
   const checkedLabel = label(input.label);
   if (!Array.isArray(input.steps) || input.steps.length === 0 || input.steps.length > 16) invalid("proposal requires 1–16 steps");
   let targets = 0;
-  const steps = Array.from(input.steps, (value, i): TrimStep | ReplaceStep => {
+  const steps = Array.from(input.steps, (value, i): TrimStep | ReplaceStep | PlaceStep => {
     const step = object(value, `steps[${i}]`); keys(step, ["command", "params"], `steps[${i}]`);
     const params = object(step.params, `steps[${i}].params`);
     if (step.command === "timeline.trim") {
@@ -147,10 +158,53 @@ function proposalInput(value: EditProposal): EditProposal {
       targets += clips.length;
       return {command: step.command, params: {clips, item, ...(params.keepSourceIn === undefined ? {} : {keepSourceIn: params.keepSourceIn})}};
     }
+    if (step.command === "timeline.place") {
+      keys(params, ["ranges"], "place");
+      if (!Array.isArray(params.ranges) || params.ranges.length === 0 || params.ranges.length > 32) invalid("place requires 1–32 ranges");
+      const ranges = Array.from(params.ranges, (value, j): SourceRange => {
+        const range = object(value, `ranges[${j}]`); keys(range, ["item", "sourceIn", "sourceOut"], `ranges[${j}]`);
+        const item = integer(range.item, `ranges[${j}].item`, 1), sourceIn = integer(range.sourceIn, `ranges[${j}].sourceIn`);
+        const sourceOut = integer(range.sourceOut, `ranges[${j}].sourceOut`);
+        if (sourceOut <= sourceIn) invalid(`ranges[${j}] must have sourceIn < sourceOut`);
+        return {item, sourceIn, sourceOut};
+      });
+      targets += ranges.length;
+      return {command: step.command, params: {ranges}};
+    }
     return invalid(`Unsupported proposal command: ${String(step.command)}`);
   });
   if (targets > 32) invalid("proposal exceeds 32 targets");
   return {expectedRevision, sequence, label: checkedLabel, steps};
+}
+
+// Find a media item's type and duration in project.inspect's bin tree (bounded walk).
+function binItem(root: unknown, item: number): {type: unknown; duration: unknown} | null {
+  const stack: unknown[] = [root];
+  for (let visited = 0; stack.length && visited < 100_000; visited++) {
+    const node = stack.pop();
+    if (!node || typeof node !== "object") continue;
+    const entry = node as Record<string, unknown>;
+    if (entry.item === item) return {type: entry.type, duration: entry.duration};
+    if (Array.isArray(entry.children)) stack.push(...entry.children.slice(0, 100_000));
+  }
+  return null;
+}
+
+// Explicit boundary rounding: widen a source range outward (In down, Out up) to the exact frame
+// grid of `rate` (sequence.settings.frame_rate), matching FilmCraft's frame_at/tick_of. Exact
+// BigInt arithmetic; an Out widened past the source end is still rejected by the engine.
+export function alignRange(range: SourceRange, rate: FrameRate): SourceRange {
+  const value = object(range, "range");
+  const item = integer(value.item, "range.item", 1), sourceIn = integer(value.sourceIn, "range.sourceIn"), sourceOut = integer(value.sourceOut, "range.sourceOut");
+  const num = BigInt(integer(rate?.num, "rate.num", 1)), den = BigInt(integer(rate?.den, "rate.den", 1));
+  if (num > 1000n * den) invalid("rate must be <= 1000 fps");
+  const tickOf = (frame: bigint) => (frame * TICKS_PER_SECOND * den + num - 1n) / num;
+  const floor = (ticks: number) => tickOf(BigInt(ticks) * num / (TICKS_PER_SECOND * den));
+  const start = floor(sourceIn), down = floor(sourceOut);
+  const out = down === BigInt(sourceOut) ? down : tickOf(BigInt(sourceOut) * num / (TICKS_PER_SECOND * den) + 1n);
+  if (out > BigInt(Number.MAX_SAFE_INTEGER)) invalid("range exceeds exact tick range");
+  if (out <= start) invalid("range must have sourceIn < sourceOut");
+  return {item, sourceIn: Number(start), sourceOut: Number(out)};
 }
 
 export class ShwayAdapter {
@@ -203,6 +257,27 @@ export class ShwayAdapter {
   play(): Promise<unknown> {return this.#transport.request("ui.playback", {action: "play"});}
   stop(): Promise<unknown> {return this.#transport.request("ui.playback", {action: "stop"});}
   seekFrame(frame: number): Promise<unknown> {return this.#execute("playhead.set", {frame: integer(frame, "frame")});}
+
+  // Gesture transport (DEV-91). Playhead moves are navigation, not project edits; cut is one edit.
+  shuttle(speed: number): Promise<unknown> {
+    if (typeof speed !== "number" || !Number.isFinite(speed) || speed === 0 || Math.abs(speed) > 8) invalid("shuttle speed must be finite, nonzero and within ±8");
+    return this.#transport.request("ui.playback", {action: "play", speed});
+  }
+  togglePlay(): Promise<unknown> {return this.#transport.request("ui.playback", {action: "toggle"});}
+  stepFrames(frames: number): Promise<unknown> {
+    const n = integer(frames, "frames", -1000);
+    if (n === 0 || n > 1000) invalid("frames must be nonzero and within ±1000");
+    return this.#execute("playhead.step", {frames: n});
+  }
+  async playhead(): Promise<number> {
+    const ui = object(await this.#transport.request("ui.inspect"), "ui.inspect response");
+    return integer(ui.playhead, "playhead");
+  }
+  seekTicks(time: number): Promise<unknown> {return this.#execute("playhead.set", {time: integer(time, "time")});}
+  nextEdit(): Promise<unknown> {return this.#execute("playhead.nextEdit");}
+  prevEdit(): Promise<unknown> {return this.#execute("playhead.prevEdit");}
+  /** Cut at the playhead (Add Edit): selected clips under it, else the targeted tracks. One undo step. */
+  cut(): Promise<unknown> {return this.#execute("sequence.addEdit");}
   async undo(): Promise<{undone: string}> {
     const result = object(await this.#execute("edit.undo"), "undo response");
     if (typeof result.undone !== "string" || !result.undone) throw new AdapterError("response", "Undo did not return an operation label");
@@ -228,6 +303,14 @@ export class ShwayAdapter {
       try {await this.#execute("proposal.cancel", {token: checkedToken});} catch {}
       throw error;
     }
+  }
+
+  // First cut: append source ranges, in order, with linked audio on V1/A1 as one preview.
+  // Commit the returned token for a single undo step, or cancel it to leave the project untouched.
+  async assemble(input: {expectedRevision: number; sequence: number; label: string; ranges: SourceRange[]}): Promise<ProposalPreview> {
+    const value = object(input, "assembly");
+    keys(value, ["expectedRevision", "sequence", "label", "ranges"], "assembly");
+    return this.preview({expectedRevision: input.expectedRevision, sequence: input.sequence, label: input.label, steps: [{command: "timeline.place", params: {ranges: input.ranges}}]});
   }
 
   async inspectPreview(value: ProposalToken): Promise<ProposalPreview> {
@@ -276,6 +359,30 @@ export class ShwayAdapter {
       if (width > maxSide || height > maxSide || !Array.isArray(result.rgba) || result.rgba.length !== width * height * 4 || Array.from(result.rgba).some(value => typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 255)) throw new AdapterError("response", "Invalid preview pixel buffer");
       return {width, height, rgba: Uint8Array.from(result.rgba)};
     }
+  }
+
+  /**
+   * Store a word-timed transcript on a recorded Movie/Audio source item via `transcript.set`.
+   * Input is copied, validated and converted to ticks before any await, then bounded by the item's
+   * current duration. One undoable "Set Transcript" edit; replaces any earlier transcript.
+   */
+  async importTranscript(value: TranscriptInput): Promise<SourceTranscript> {
+    let transcript: SourceTranscript;
+    try {transcript = parseTranscript(value);} catch (error) {
+      if (error instanceof TranscriptError) invalid(error.message);
+      throw error;
+    }
+    const project = await this.#inspectProject();
+    const found = binItem(project.root, transcript.sourceItemId);
+    if (!found) invalid(`Source item ${transcript.sourceItemId} is not in the project`);
+    if (found.type !== "Movie" && found.type !== "Audio") invalid(`Source item ${transcript.sourceItemId} is not recorded media`);
+    const duration = integer(found.duration, "source duration");
+    // Words are ordered and non-overlapping, so the last end bounds them all.
+    if ((transcript.words.at(-1)?.end ?? 0) > duration) invalid("Transcript ends after the source duration");
+    const {sourceItemId: item, language, words} = transcript;
+    const result = object(await this.#execute("transcript.set", {item, transcript: {language, words}}), "transcript response");
+    if (result.item !== item || result.words !== words.length) throw new AdapterError("response", "transcript.set stored an unexpected item or word count");
+    return transcript;
   }
 
   async export(settings: {path: string; bitrateKbps?: number}): Promise<{job: number; path: string}> {

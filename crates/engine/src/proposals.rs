@@ -42,6 +42,8 @@ enum Step {
     Trim(Trim),
     #[serde(rename = "clip.replaceFromBin")]
     Replace(Replace),
+    #[serde(rename = "timeline.place")]
+    Place(Place),
 }
 
 #[derive(Deserialize)]
@@ -75,6 +77,21 @@ struct Replace {
     item: u64,
     #[serde(default)]
     keep_source_in: bool,
+}
+
+/// Explicit source ranges appended, in order, after everything already in the active sequence.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Place {
+    ranges: Vec<SourceRange>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct SourceRange {
+    item: u64,
+    source_in: i64,
+    source_out: i64,
 }
 
 #[derive(Deserialize)]
@@ -297,6 +314,50 @@ fn apply(s: &mut Session, step: Step) -> Result<Value> {
             targets(s, &p.clips)?;
             Ok(result)
         }
+        Step::Place(p) => {
+            // preview() already bounded the cumulative count before parsing.
+            if p.ranges.is_empty() {
+                return Err(bad("need at least one source range"));
+            }
+            frame_ticks(s)?;
+            let rate = s.sequence_rate();
+            let mut placed = Vec::with_capacity(p.ranges.len());
+            for r in p.ranges {
+                id(r.item)?;
+                let end = source_duration(s, ItemId(r.item))?;
+                let (start, out) = (tick(r.source_in)?, tick(r.source_out)?);
+                if start < Tick::ZERO || out <= start || out > end {
+                    return Err(bad("each range needs 0 <= sourceIn < sourceOut <= source duration"));
+                }
+                // timeline.place would silently snap a fractional duration; the caller rounds instead.
+                if rate.snap(start) != start || rate.snap(out) != out {
+                    return Err(bad("sourceIn and sourceOut must lie on sequence frame boundaries; round explicitly before proposing"));
+                }
+                // timeline.place itself rejects V1 for an item without a picture.
+                let audio = s.project.item(ItemId(r.item)).ok_or_else(|| bad("missing source item"))?.has_audio();
+                let duration = out.0.checked_sub(start.0).ok_or_else(|| bad("source range overflow"))?;
+                // Append after every track's content: overwrite then never touches existing clips.
+                let at = s.active_sequence().ok_or(EngineError::NoSequence)?.duration();
+                tick(at.0.checked_add(duration).ok_or_else(|| bad("sequence range overflow"))?)?;
+                let mut params =
+                    json!({"item":r.item,"track":"V1","time":at.0,"sourceIn":start.0,"duration":duration,"insert":false,"video":true,"audio":audio});
+                if audio {
+                    params["audioTrack"] = json!("A1");
+                }
+                let result = s.execute("timeline.place", params)?;
+                let clips: Vec<u64> = result.get("clips").and_then(Value::as_array).map(|v| v.iter().filter_map(Value::as_u64).collect()).unwrap_or_default();
+                // Locks, source containment and linked A/V sync of everything just placed.
+                // timeline.place errors (never drops a stream) for missing or locked V1/A1.
+                for c in &targets(s, &clips)? {
+                    let clip = check_clip(s, *c)?;
+                    if clip.item != ItemId(r.item) || clip.start != at || clip.source_in != start || clip.duration.0 != duration {
+                        return Err(bad("placement does not match the exact requested range"));
+                    }
+                }
+                placed.push(json!({"item":r.item,"start":at.0,"sourceIn":start.0,"sourceOut":out.0,"clips":clips}));
+            }
+            Ok(json!({"placed":placed}))
+        }
     }
 }
 
@@ -330,7 +391,8 @@ pub fn preview(s: &mut Session, v: &Value) -> Result<Value> {
     let mut target_count = 0usize;
     for step in steps {
         let params = step.get("params");
-        let count = params.and_then(|p| p.get("clips")).and_then(Value::as_array).map_or(1, Vec::len);
+        let list = params.and_then(|p| p.get("clips").or_else(|| p.get("ranges")));
+        let count = list.and_then(Value::as_array).map_or(1, Vec::len);
         target_count = target_count.checked_add(count).ok_or_else(|| bad("target count overflow"))?;
         if target_count > MAX_TARGETS {
             return Err(bad("at most 32 explicit target references across the proposal"));

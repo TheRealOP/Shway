@@ -2,6 +2,19 @@
 
 Current local results: [foundation evidence](foundation-evidence.md).
 
+**Demo page status 2026-10-10 (DEV-93):** [surface/demo.html](../../surface/README.md) runs the
+editor next to the Shway panel. Verified in Claude's browser pane with synthetic events, the PR #2
+engine build and the demo project (no camera or mic): the adapter connects; swipe, step, chop and
+panel Undo drive the editor; a real trim proposal previews without changing the timeline; accept by
+double tap and by `A`, reject by `X`, and Undo each act once; brief validation and the missing
+first-cut/replacement hooks report clearly. With `replace.js` from the DEV-92 branch (bcab4e0) and a live
+Gemini call, a typed utterance reached `proposeReplacement`. It showed "select the clip" without a
+selection and "no matching take" for unrelated takes. For matching synthetic takes, it showed the engine's
+refusal (A2 sync lock in the demo project), so no replacement preview was staged; camera and microphone denial is reported; no horizontal
+scroll at 400 px. Not verified: live camera or microphone, the still-pinch talk gesture with a real hand,
+visible editor rendering (the pane was hidden, so the editor did not paint), and the first-cut and
+replacement flows (their modules are not built yet).
+
 ## Complete creator workflow
 
 - Real source footage imports, plays, edits, undoes, and exports.
@@ -45,3 +58,16 @@ Remove protected upstream branding from modified distributions.
 ## Related pages
 
 [Wiki map](README.md) · [Implementation](implementation.md) · [Interactions](interactions.md) · [Inference](inference.md) · [Adaptation](adaptation.md)
+
+**Integrated chain, verified 2026-10-10.**
+- **Setup:** branch `claude/integration`, browser build with `timeline.place`, live `gemini-3.8-flash`
+  through the local proxy, generated 25 s fixture with a hand-written transcript of 3 takes × 2 lines.
+- **First cut:** brief → take index → Gemini chose one take per line, avoiding the "uh" take.
+  `assembleFirstCut` staged it, and commit gave one undo step, "AI first cut".
+- **Replacement:** select the line-2 clip, then the typed correction "That's too shouty. Use the calm,
+  clean take…". `proposeReplacement` previewed the calm take and the real timeline stayed unchanged.
+  Commit gave "Replace take: …".
+- **Undo:** the first undo restored the first cut exactly. The second undo emptied the sequence.
+- **Correct refusal:** asking for a take that doesn't exist returned `rejected` with Gemini's reason
+  and staged nothing.
+- **Not verified:** the creator's real footage, live camera and microphone, and export of the result.

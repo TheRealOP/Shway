@@ -6,7 +6,7 @@ project, exact edit time, rendering, and undo history. No second timeline is mai
 Requires Node 26 for the dependency-free TypeScript-to-browser module build:
 
 ```sh
-node --test shway/adapter.test.ts
+node --test shway/*.test.ts
 node shway/build.mjs --out target/agent-foundation/web/dist
 ```
 
@@ -23,12 +23,25 @@ Connection discovers command IDs and rejects engines that lack the proposal boun
 contains human-readable parameter descriptions; it is not itself a strict JSON schema. This adapter
 and Rust's typed deserializer validate the allowlisted proposal shape.
 
-The supported proposal steps are `timeline.trim` and `clip.replaceFromBin`. Proposals explicitly name
+The supported proposal steps are `timeline.trim`, `clip.replaceFromBin` and `timeline.place`. Proposals explicitly name
 expected revision, active sequence, target clips, source IDs, and frame deltas. Requests are limited
 to 16 steps, 32 total explicit target references, and labels of at most 120 UTF-8 bytes. Rust stages them in a
 disposable session. `previewFrame` returns bounded RGBA pixels from that candidate without changing
 the authoritative timeline. Explicit pending media responses retry for at most five seconds. Real
 source/decode failures, stale revisions and changed interaction context remain actionable errors.
+
+`assemble({expectedRevision, sequence, label, ranges})` builds a first cut: one `timeline.place`
+step appending `ranges: [{item, sourceIn, sourceOut}]` (source ticks) in order on V1 with linked
+audio on A1, after the active sequence's existing content. Ranges must lie on the sequence frame
+grid; `alignRange(range, sequence.settings.frame_rate)` widens word-boundary ticks explicitly
+(In down, Out up) with exact integer math. Make or activate an empty sequence first for a clean cut.
+
+```js
+const rate = sequence.settings.frame_rate;
+const ranges = takes.map(t => alignRange({item: t.item, sourceIn: t.sourceIn, sourceOut: t.sourceOut}, rate));
+const preview = await adapter.assemble({expectedRevision: project.revision, sequence: sequence.id, label: 'First cut', ranges});
+await adapter.commit(preview.token); // one undo step; or adapter.cancel(preview.token)
+```
 
 `commit` makes one normal undoable edit; `cancel` discards the candidate. Seek and normal controls
 remain available. A newer edit is preserved when a stale proposal is rejected or discarded.
@@ -51,5 +64,204 @@ ffmpeg -hide_banner -loglevel error -y -f lavfi -i color=c=green:size=320x180:ra
 node apps/filmcraft-web/tests/foundation.mjs --url http://127.0.0.1:8765/ --media web-test.mp4 --out target/agent-foundation/web/proposals --proposals
 ```
 
+## Transcripts and takes (DEV-88)
+
+`takes.ts` holds a provider-neutral word-timed transcript format and a take index; no
+transcription provider is chosen. One JSON object per recorded source item:
+
+```json
+{"sourceItemId": 41, "timeUnit": "seconds", "language": "en",
+ "words": [{"text": "Welcome", "start": 0.5, "end": 0.9, "confidence": 0.93}]}
+```
+
+`timeUnit` is `seconds` or `ticks` (no default). `parseTranscript` rejects unknown fields, NaN,
+infinities, negative/fractional ticks, unordered or overlapping words, empty or >100-character
+words, more than 20,000 words, and times that do not convert to exact safe-integer ticks
+(254,016,000,000 per second, rounded once at this boundary). `adapter.importTranscript(input)`
+validates before any await, requires a Movie/Audio project item whose duration covers every word,
+then calls the engine's `transcript.set` (`{item, transcript: {language, words}}`) as one undoable
+"Set Transcript" edit, replacing that item's earlier transcript.
+
+`indexTakes(transcripts, script, minScore = 0.6)` groups word ranges into takes per script
+statement: for each start word it takes the best window up to 1.25× the statement length, scored
+by Dice overlap of normalized tokens, then accepts candidates greedily by score without overlap.
+Each `Take` is `{sourceItemId, sourceIn, sourceOut, words, statementIndex, score}`; `sourceIn`/
+`sourceOut` are source-media ticks of the first word start and last word end, never timeline
+clip IDs or sequence time. Linked audio and multi-source sync are not indexed.
+
+```sh
+node --test shway/*.test.ts
+node apps/filmcraft-web/tests/foundation.mjs --url http://127.0.0.1:8765/ --media web-test.mp4 --out target/web/transcripts --transcripts
+```
+
 See [foundation evidence](../docs/wiki/foundation-evidence.md) and the
 [architecture contract](../docs/wiki/architecture.md). Never commit fixtures or generated output.
+
+## Story brief and AI first cut (DEV-89 / DEV-90)
+
+`firstcut.ts` turns an editable brief plus the take index into a first cut. The model only
+**chooses**: each candidate take is offered by an opaque number with its exact words and score, never
+with times. Every `sourceIn`/`sourceOut` in the result is copied from the take index.
+
+```js
+const {parseTranscript, indexTakes} = await import('/takes.js');
+const {parseBrief, planFirstCut, proxyGenerate} = await import('/firstcut.js');
+const brief = parseBrief({message: "…", audience: "…", feeling: "…", durationSeconds: 30,
+  requiredMoments: ["…"], exclusions: ["filler words"]});   // throws FirstCutError on bad input
+const takes = indexTakes([parseTranscript(transcriptJson)], script);
+const plan = await planFirstCut({brief, script, takes, generate: proxyGenerate()});
+// plan.choices: [{statementIndex, take, reason}]  plan.ranges: [{item, sourceIn, sourceOut}]
+// plan.skipped: statements with no indexed take (left out of the cut)
+```
+
+- **Brief:** `message`, `audience`, `feeling` (1–500 characters), optional `durationSeconds`
+  (0–3600], `requiredMoments`/`exclusions` (≤20 strings). Unknown fields are rejected. The brief
+  reaches the model only as JSON data, under a system rule that data is not instructions.
+- **Validation:** the response must have exactly one choice per statement that has candidates, each
+  naming a take that exists and belongs to that statement, with a 1–300 character reason and no
+  extra fields (so no model-supplied times). Invalid output gets one retry quoting the error, then
+  `planFirstCut` throws `FirstCutError`. Transport errors from `generate` propagate without retry.
+- **Bounds:** ≤200 statements, ≤400 takes; take times are copied before the model call.
+- `generate` is injected (`proxyGenerate(url)` posts to the local Gemini proxy and returns its `json`).
+- **Assembly:** `const preview = await assembleFirstCut(adapter, plan)` reads the active sequence
+  and its `settings.frame_rate`. It widens each range outward with `alignRange` and stages the
+  ranges, in script order, after the sequence's content via `adapter.assemble` (`timeline.place`,
+  V1 + linked A1). Then `adapter.commit(preview.token)` (one undo step) or `adapter.cancel(...)`.
+  Use an empty sequence for a clean cut. It needs an active sequence and 1–32 ranges. A last word
+  that ends exactly at the source end can widen past it and be refused.
+
+## Gemini proxy (creative reasoning)
+
+`shway/gemini-server.mjs` is a local proxy, so the API key never reaches a web page. Node ≥ 22, no
+packages.
+
+```sh
+node shway/gemini-server.mjs --port 8790      # reads GEMINI_API_KEY (optional GEMINI_MODEL) from <main checkout>/.env
+```
+
+- **Key file:** the `.env` lives beside the main checkout (found through `git rev-parse --git-common-dir`),
+  so every worktree uses one file. `SHWAY_ENV=/path/.env` overrides it. `.env` is excluded from git.
+- **`POST /generate`:** body `{prompt, system?, schema?, model?}`. It returns `{model, usage, text}`,
+  or `{model, usage, json}` when you pass a `schema`. A `schema` is a Gemini `responseSchema`
+  (OpenAPI subset: `OBJECT`, `STRING`, …).
+- **`POST /transcribe`:** body `{mimeType, data}`. `mimeType` is `audio/webm`, `audio/ogg`,
+  `audio/mp4` or `audio/wav`; a codec parameter such as `;codecs=opus` is allowed. `data` is base64.
+  The route sends the audio inline to Gemini with an instruction to transcribe verbatim and returns
+  `{model, usage, text}`. Request bodies may be up to 10 MB on this route only.
+- **`GET /health`:** returns `{ok, model}`.
+- **Default model:** `gemini-3.8-flash`. It calls `models/{model}:generateContent` with the key in the
+  `x-goog-api-key` header.
+- **Safety:** only pages served from this machine (localhost, 127.0.0.1, [::1]) may call it.
+  Bodies over 2 MB are refused (10 MB for `/transcribe`). The proxy keeps reading an upload up to
+  4× the limit, so the client receives the 413 response instead of a broken pipe. Upstream errors never echo the key.
+- **Verified 2026-10-10:** 9 tests against a fake upstream. One live structured call with the real key:
+  a three-take choice returned `{take, reason}` JSON.
+- **Verified 2026-10-10 (DEV-92):** 11 tests against the fake upstream. One live `/transcribe` call
+  sent a macOS `say` recording of "That sounds rehearsed. Use the take where I laugh." as WAV.
+  The proxy returned that sentence exactly.
+
+## Take replacement (DEV-92)
+
+`replace.ts` turns a spoken correction about the selected clip into a previewed, reversible take
+replacement. Build `replace.js` beside `adapter.js` with `node shway/build.mjs --out <dist>`.
+
+```js
+import {proposeReplacement, geminiGenerate, transcribe} from "/replace.js";
+utterance.transcript ??= await transcribe(utterance.audio);          // {text} via POST /transcribe
+const r = await proposeReplacement({utterance, takes, generate: geminiGenerate(), adapter});
+// takes = indexTakes(transcripts, script); optional overrides: transcript (string), context
+if (r.status === "preview") { /* show r.label, r.explanation; then */ await adapter.commit(r.token); /* or adapter.cancel(r.token) */ }
+else showMessage(r.message);  // "need-selection" | "no-take" | "rejected"
+// After a commit, adapter.undo() removes the whole replacement in one step.
+```
+
+`proposeReplacement` works in these steps:
+
+1. **Context:** it reads `utterance.context` (`{revision, sequence, selection}`), the snapshot taken
+   when push-to-talk started.
+2. **Target:** the selection must be exactly one clip, or that clip's linked A/V pair. With no
+   clip or several clips selected it returns `need-selection` and does not call the model.
+3. **Current take:** it maps the clip to the indexed take whose source range overlaps the clip's
+   range the most.
+4. **Choice:** Gemini sees the other takes of the same statement only as numbers with their words,
+   never as IDs or times. It must answer with a schema-checked index. An answer that is out of
+   range, not an integer, the current take, or `-1` (none fits) returns `rejected`, and nothing is
+   staged.
+5. **Steps:** the chosen take covers whole frames: the first frame at or before its first word,
+   through the last frame at or after its last word.
+   - A take in the same source item needs two ripple trims, which slip and resize the clip in
+     place. The order keeps every intermediate range valid.
+   - A take in another source item first gets a ripple Out trim if it is shorter. Then comes
+     `clip.replaceFromBin` (no `keepSourceIn`) and the same two trims.
+   - Ripple trims shift later clips, so the new take's length is kept exactly.
+6. **Preview:** the steps go to `adapter.preview` with the snapshot's revision. If the staged clip
+   does not have the expected item, source In and duration, the preview is cancelled and the result
+   is `rejected`.
+
+Errors from `adapter.preview` are passed through unchanged for re-planning. These include a stale
+revision or interaction context (`AdapterError` code `stale`), a source too short for the take
+(`clip range must be positive and contained in its source`), missing handles, and sync locks.
+
+Limitations: `project.inspect` does not expose source marks, so a replacement item with a source
+In mark stages a range other than the take. The staged-range check then cancels the preview. A
+take ending in the last partial frame of its media can be rejected by the engine. Ripple trims
+follow the engine's sync-lock rules, and a locked track refuses the edit.
+
+Evidence (2026-10-10):
+
+- **Tests:** `node --test shway/replace.test.ts` runs 8 tests with a fake model and adapter. They
+  cover the happy path, a take in another item, an earlier take, missing, several or unknown
+  selections, invented, current and declined takes, a missing transcript or take, stale-revision
+  and engine-error passthrough, and a staged-range mismatch. Mutation check: removing any of 22
+  guards fails at least one test.
+- **Live model:** for "That sounds rehearsed; use the take where I laugh", Gemini picked the
+  `[laughs]` take out of three.
+- **Real browser engine:** a prebuilt web dist ran with generated fixtures. `takes.mp4` holds
+  three 4 s color takes and `other-take.mp4` is a 3 s alternative. A hand-written transcript was
+  imported and the take index built.
+  - Selecting the clip and running the demo line through live Gemini produced a preview with
+    ripple trims +85 Out and +103 In.
+  - The authoritative timeline and history were unchanged until commit.
+  - The candidate frame rendered green, which is the laughing take.
+  - Commit made one undo step labelled `Replace take: …`, and `undo()` restored the original.
+  - Selecting the audio half and choosing the other source item staged a trim, `replaceFromBin`
+    and two more trims. The frame rendered yellow, commit and a single undo worked, and cancel left
+    the timeline unchanged.
+  - An edit made after the snapshot raised `AdapterError/stale`, and an empty selection returned
+    `need-selection`.
+- **Not verified:**
+  - A live microphone utterance through the demo page.
+  - Replacement items with source marks.
+  - Projects with sync-locked tracks. The demo project's A2 sync lock refused a replacement in
+    the demo agent's run.
+
+## Local word-timed transcripts (DEV-88)
+
+`shway/transcribe-local.mjs` runs FilmCraft's built-in Whisper (pure Rust, candle, CPU) headlessly
+and writes a `TranscriptInput` (`timeUnit: "ticks"`) for `parseTranscript` /
+`adapter.importTranscript`. No paid provider, no network after the one-off model download. Node ≥ 22.
+
+```sh
+cargo build --release -p filmcraft-cli --features whisper      # speech is off in default builds
+node shway/transcribe-local.mjs clip.mp4 --download --out clip.transcript.json   # first run only: --download
+node shway/transcribe-local.mjs clip.mp4 --source-item 41 --language en --out clip.transcript.json
+node --test shway/transcribe-local.test.mjs
+```
+
+- **Flow:** `filmcraft-cli import` into a throwaway project, `exec transcript.generate`, then the
+  engine's stored transcript (`project.transcripts[id]`, media-time ticks) is exported as is.
+  Blank words are dropped; malformed or overlapping bounds fail the run instead of being guessed.
+- **`--source-item`:** the item id in the project the transcript will be imported into (default:
+  the throwaway project's id, which is 1). **`--model`:** `whisper-tiny` | `whisper-base` (default) |
+  `whisper-small`. **`--language`:** `auto` (default) or an ISO code. **`--cli`:** default
+  `target/release/filmcraft-cli`.
+- **Model:** `--download` runs `transcript.downloadModel`: pinned OpenAI Hugging Face revisions,
+  SHA-256 checked, into `$FILMCRAFT_DATA_DIR` or `~/Library/Application Support/FilmCraft/models`.
+  whisper-base is 293 MB (tiny 154 MB, small 969 MB). Licence: MIT (OpenAI weights), HF conversion
+  Apache-2.0. Never commit weights.
+- **Verified 2026-10-10 (Apple M2):** `say` speech, 5.37 s, as mp4 and wav fixtures made by ffmpeg.
+  All 16 words were correct, with monotonic times from 0.05 s to 5.34 s. The ffprobe duration is
+  5.375 s. The first run took 20 s, including the download. Later runs took 4.8 s wall, including
+  the model load. `parseTranscript` accepted the output. `indexTakes` found all three script lines
+  at score 1.00. The built-in recogniser sets no confidence (every word gets 1), so do not rank takes on
+  confidence. Real creator footage, noisy audio and clips over 30 s are not yet verified.

@@ -360,3 +360,154 @@ fn unresolved_source_wins_over_pending_peer_in_both_layer_orders() {
         assert!(error.to_string().contains("cannot be opened"), "pending top={pending_on_top}: {error}");
     }
 }
+
+/// An empty new sequence plus two finite A/V sources and the sequence frame duration in ticks.
+fn assembly_fixture() -> (Session, u64, u64, i64) {
+    let (mut s, _, a, _) = fixture();
+    let b = s.project.items.values().find(|i| i.id != ItemId(a) && i.as_media().is_some() && i.has_audio() && i.has_video()).unwrap().id.0;
+    s.execute("file.newSequence", json!({"name":"First cut","width":64,"height":36})).unwrap();
+    let f = s.sequence_rate().frame_duration().0;
+    (s, a, b, f)
+}
+
+fn assemble(s: &Session, ranges: Value) -> Value {
+    json!({"expectedRevision":s.revision,"sequence":s.state.active_sequence.unwrap().0,"label":"Assemble first cut",
+        "steps":[{"command":"timeline.place","params":{"ranges":ranges}}]})
+}
+
+#[test]
+fn assembly_places_exact_ranges_in_order_with_synced_audio_as_one_undo_step() {
+    let (mut s, a, b, f) = assembly_fixture();
+    let base = s.project.clone();
+    let undo = s.history.undo.len();
+    let ranges = json!([
+        {"item":a,"sourceIn":2*f,"sourceOut":10*f},
+        {"item":b,"sourceIn":0,"sourceOut":5*f},
+        {"item":a,"sourceIn":20*f,"sourceOut":23*f},
+    ]);
+    let p = assemble(&s, ranges);
+    let token = run(&mut s, p);
+    assert!(Arc::ptr_eq(&s.project, &base));
+    let preview = s.execute("proposal.inspect", json!({"token":token})).unwrap();
+    let expected = [(a, 0, 8 * f, 2 * f), (b, 8 * f, 5 * f, 0), (a, 13 * f, 3 * f, 20 * f)];
+    for kind in ["video", "audio"] {
+        let items = preview["sequence"][kind][0]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 3, "{kind}");
+        for (clip, (item, start, duration, source_in)) in items.iter().zip(expected) {
+            assert_eq!((clip["item"].as_u64().unwrap(), clip["start"].as_i64().unwrap()), (item, start));
+            assert_eq!((clip["duration"].as_i64().unwrap(), clip["sourceIn"].as_i64().unwrap()), (duration, source_in));
+        }
+    }
+    let video = &preview["sequence"]["video"][0]["items"];
+    let audio = &preview["sequence"]["audio"][0]["items"];
+    for i in 0..3 {
+        assert!(!video[i]["link"].is_null());
+        assert_eq!(video[i]["link"], audio[i]["link"]);
+    }
+    assert_eq!(preview["results"][0]["placed"].as_array().unwrap().len(), 3);
+    s.execute("proposal.commit", json!({"token":token})).unwrap();
+    assert_eq!(s.history.undo.len(), undo + 1);
+    assert_eq!(s.active_sequence().unwrap().duration().0, 16 * f);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(*s.project, *base);
+}
+
+#[test]
+fn assembly_appends_after_existing_content_without_touching_it() {
+    let (mut s, _, source, _) = fixture();
+    let before = s.active_sequence().unwrap().clone();
+    let end = before.duration().0;
+    let f = s.sequence_rate().frame_duration().0;
+    let p = assemble(&s, json!([{"item":source,"sourceIn":0,"sourceOut":4*f}]));
+    let token = run(&mut s, p);
+    s.execute("proposal.commit", json!({"token":token})).unwrap();
+    let q = s.active_sequence().unwrap();
+    for (old, new) in before.video_tracks.iter().zip(&q.video_tracks).chain(before.audio_tracks.iter().zip(&q.audio_tracks)) {
+        assert_eq!(new.items.iter().filter(|c| c.start.0 < end).cloned().collect::<Vec<_>>(), old.items);
+    }
+    assert_eq!(q.video_tracks[0].items.last().unwrap().start.0, end);
+}
+
+#[test]
+fn assembly_cancel_leaves_project_untouched() {
+    let (mut s, a, _, f) = assembly_fixture();
+    let base = s.project.clone();
+    let (undo, revision) = (s.history.undo.clone(), s.revision);
+    let p = assemble(&s, json!([{"item":a,"sourceIn":0,"sourceOut":f}]));
+    let token = run(&mut s, p);
+    s.execute("proposal.cancel", json!({"token":token})).unwrap();
+    assert!(Arc::ptr_eq(&s.project, &base));
+    assert_eq!((s.history.undo.clone(), s.revision), (undo, revision));
+    assert!(s.proposal.is_none());
+}
+
+#[test]
+fn hostile_assembly_ranges_are_rejected_without_a_candidate() {
+    let (mut s, a, _, f) = assembly_fixture();
+    let end = s.project.item(ItemId(a)).unwrap().as_media().unwrap().info.duration.0;
+    let seq = s.state.active_sequence.unwrap().0;
+    let range = |item: u64, i: i64, o: i64| json!({"item":item,"sourceIn":i,"sourceOut":o});
+    let mut cases = vec![
+        ("overflow", assemble(&s, json!([range(a, 0, i64::MAX)]))),
+        ("float", assemble(&s, json!([{"item":a,"sourceIn":0,"sourceOut":1e300}]))),
+        ("negative", assemble(&s, json!([range(a, -f, f)]))),
+        ("zero length", assemble(&s, json!([range(a, f, f)]))),
+        ("reversed", assemble(&s, json!([range(a, 2 * f, f)]))),
+        ("past end", assemble(&s, json!([range(a, 0, end + f)]))),
+        ("unaligned", assemble(&s, json!([range(a, 1, f)]))),
+        ("missing item", assemble(&s, json!([range(999_999, 0, f)]))),
+        ("zero item", assemble(&s, json!([range(0, 0, f)]))),
+        ("sequence item", assemble(&s, json!([range(seq, 0, f)]))),
+        ("unknown field", assemble(&s, json!([{"item":a,"sourceIn":0,"sourceOut":f,"speed":2}]))),
+        ("empty", assemble(&s, json!([]))),
+        ("too many", assemble(&s, json!(vec![range(a, 0, f); 33]))),
+    ];
+    let mut stale = assemble(&s, json!([range(a, 0, f)]));
+    stale["expectedRevision"] = json!(s.revision - 1);
+    cases.push(("stale", stale));
+    let base = s.project.clone();
+    let history = s.history.undo.clone();
+    for (name, p) in cases {
+        let error = s.execute("proposal.preview", p).unwrap_err().to_string();
+        // Each case must hit its own guard, not an incidental later failure.
+        let expected = match name {
+            "overflow" => "exact supported ticks",
+            "float" | "unknown field" => "invalid parameters",
+            "negative" | "zero length" | "reversed" | "past end" => "0 <= sourceIn < sourceOut <= source duration",
+            "unaligned" => "frame boundaries",
+            "missing item" => "missing source item",
+            "zero item" => "positive exact browser integers",
+            "sequence item" => "only finite media",
+            "empty" => "at least one source range",
+            "too many" => "32 explicit target references",
+            _ => "stale revision",
+        };
+        assert!(error.contains(expected), "{name}: {error}");
+        assert!(Arc::ptr_eq(&s.project, &base), "{name}");
+        assert_eq!(s.history.undo, history, "{name}");
+        assert!(s.proposal.is_none(), "{name}");
+    }
+}
+
+#[test]
+fn assembly_rejects_offline_sources_and_locked_targets() {
+    let (mut s, a, _, f) = assembly_fixture();
+    s.edit("Offline source fixture", |p, _| {
+        p.item_mut(ItemId(a)).unwrap().as_media_mut().unwrap().offline = true;
+        Ok(())
+    })
+    .unwrap();
+    let p = assemble(&s, json!([{"item":a,"sourceIn":0,"sourceOut":f}]));
+    assert!(s.execute("proposal.preview", p).unwrap_err().to_string().contains("offline"));
+    for kind in ["video", "audio"] {
+        let (mut s, a, _, f) = assembly_fixture();
+        let q = s.active_sequence().unwrap();
+        let track = if kind == "video" { q.video_tracks[0].id } else { q.audio_tracks[0].id };
+        s.execute("timeline.setTrack", json!({"track":track.0,"locked":true})).unwrap();
+        let base = s.project.clone();
+        let p = assemble(&s, json!([{"item":a,"sourceIn":0,"sourceOut":f}]));
+        assert!(s.execute("proposal.preview", p).unwrap_err().to_string().contains("locked"), "{kind}");
+        assert!(Arc::ptr_eq(&s.project, &base));
+        assert!(s.proposal.is_none());
+    }
+}

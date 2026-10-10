@@ -52,6 +52,37 @@ One continuous adjustment commits once and undoes once.
 Measure p95 gesture-to-visible-feedback latency, aiming below 150 ms on demo hardware.
 Measure actual latency rather than advertising the target as a result.
 
+**Status 2026-10-10:** recognition slice (engage, twist shuttle/fine step, swipe, loss/cancel latch)
+is implemented in [surface/gestures](../../surface/gestures/README.md). It passes synthetic replay tests.
+Live camera tracking, editor integration and latency are not yet verified.
+The README holds the event boundary for the adapter.
+
+**Voice status 2026-10-10:** push-to-talk capture is implemented in
+[surface/voice](../../surface/voice/README.md). Utterances snapshot the interaction context at start
+and carry gestures from a bounded window (2 s before start through release). Capture exists only
+while push-to-talk is held. Replay tests pass and are mutation-checked. The harness reports
+microphone denial. Live microphone capture, speaker bleed and speech-to-text (no provider chosen)
+are not verified. Target resolution and proposal creation remain DEV-92 work.
+
+**Take replacement status 2026-10-10 (DEV-92):** [shway/replace.ts](../../shway/README.md#take-replacement-dev-92)
+turns a transcript and its context snapshot into a previewed replacement. The target is the
+captured selection: one clip or its linked A/V pair. With no clip or several clips selected it
+asks for a selection and does not call the model. Gemini chooses only among the indexed takes of
+the same statement, which it sees as opaque numbers. Rust stages the edit. Accept, reject and undo
+each take one step. Speech-to-text runs through the local proxy's `POST /transcribe`.
+
+- **Verified:** tests pass and are mutation-checked.
+- **Verified:** one live transcription returned the exact spoken sentence.
+- **Verified:** a live model choice picked the laughing take.
+- **Verified:** in the real browser engine with generated fixtures:
+  - The flow ran from preview through commit, a single undo, cancel and a stale rejection.
+  - The preview rendered the chosen take's frames.
+  - The replacement worked within one source item and from another source item.
+- **Not verified:**
+  - A live microphone recording.
+  - The demo page as a whole.
+  - Replacement items that have source In marks.
+
 ## Related pages
 
 [Wiki map](README.md) · [Architecture](architecture.md) · [Adaptation](adaptation.md) · [Acceptance](acceptance.md)
