@@ -429,7 +429,6 @@ pub fn apply_visuals(ctx: &egui::Context, t: &Tokens) {
         v.widgets.active.bg_stroke = Stroke::new(1.0, t.focus);
         v.widgets.open.bg_stroke = Stroke::NONE;
         v.slider_trailing_fill = true;
-        v.handle_shape = egui::style::HandleShape::Circle;
     }
     ctx.set_visuals(v);
     ctx.global_style_mut(|s| {
