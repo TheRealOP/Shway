@@ -1,0 +1,182 @@
+<!doctype html>
+<!-- Shway push-to-talk harness (DEV-92 voice capture). Serve the surface directory on localhost
+     (microphone access needs a secure context): python3 -m http.server -d surface 8771
+     → http://127.0.0.1:8771/voice/voice.html
+     Hold V (or the button) to record · release to finish · Esc cancels. No external dependencies;
+     no speech-to-text provider is configured, so nothing leaves the page. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shway Voice</title>
+<style>
+  :root { --bg: #fff; --fg: #111; --muted: #666; --accent: #0a7; --warn: #c50; --rec: #d22; --track: #ddd; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #111; --fg: #eee; --muted: #999; --accent: #3c9; --warn: #f80; --rec: #f55; --track: #333; } }
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg); font: 14px system-ui, sans-serif; }
+  #ptt { font: 600 18px system-ui, sans-serif; padding: 16px 24px; border-radius: 8px; border: 2px solid var(--muted);
+    background: transparent; color: var(--fg); touch-action: none; user-select: none; }
+  #ptt[data-rec="true"] { border-color: var(--rec); background: var(--rec); color: #fff; }
+  #state { font-size: 28px; font-weight: 600; margin: 12px 0 4px; }
+  #state[data-rec="true"] { color: var(--rec); }
+  #state[data-rec="true"]::before { content: "● "; animation: blink 1s steps(2) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  meter { width: min(320px, 100%); height: 16px; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin: 8px 0; }
+  dt { color: var(--muted); }
+  #err { color: var(--warn); }
+  #notice { color: var(--muted); }
+  ol { padding-left: 20px; }
+  li { margin: 8px 0; }
+  li pre { font: 12px ui-monospace, monospace; white-space: pre-wrap; margin: 4px 0; color: var(--muted); }
+  audio { display: block; max-width: 100%; }
+</style>
+</head>
+<body>
+<button id="ptt" data-rec="false" aria-pressed="false">Hold to talk (V)</button>
+<div id="state" data-rec="false" role="status" aria-live="polite">Not recording</div>
+<dl>
+  <dt>mic level</dt><dd><meter id="level" min="0" max="1" value="0"></meter> <span id="levelNote">–</span></dd>
+  <dt>elapsed</dt><dd id="elapsed">–</dd>
+  <dt>context</dt><dd id="ctx">–</dd>
+</dl>
+<div id="err"></div>
+<div id="notice"></div>
+<h3>Utterances</h3>
+<ol id="list"></ol>
+<script type="module">
+import { createVoice } from "./utterance.mjs";
+
+const $ = (id) => document.getElementById(id);
+const voice = createVoice();
+let stream = null, recorder = null;
+// Interaction context: the editor adapter replaces this getter (selection, target, playhead, gesture state).
+let getContext = () => ({ selection: [], target: null, playhead: null, gesture: null });
+// Utterances cross the integration boundary here. DEV-92's proposal flow replaces this sink.
+let sink = (u) => console.log("utterance", u);
+// Speech-to-text hook: no provider is chosen yet. Replace with setTranscriber(fn).
+let transcribe = async (_blob) => { throw new Error("no speech-to-text provider configured"); };
+
+window.shwayVoice = {
+  voice,
+  start: () => handle(voice.start(performance.now(), getContext(), "gesture")),
+  stop: () => handle(voice.stop(performance.now())),
+  cancel: () => handle(voice.cancel(performance.now())),
+  gesture: (e) => voice.gesture(e),
+  setContext: (fn) => { getContext = fn; },
+  setSink: (fn) => { sink = fn; },
+  setTranscriber: (fn) => { transcribe = fn; },
+};
+
+function render() {
+  const v = voice.view();
+  $("ptt").dataset.rec = $("state").dataset.rec = String(v.recording);
+  $("ptt").setAttribute("aria-pressed", String(v.recording));
+  $("state").textContent = v.recording ? `Recording ${v.id}` : "Not recording";
+  $("ctx").textContent = JSON.stringify(getContext());
+}
+
+// One MediaRecorder per utterance, started only on an explicit push-to-talk start.
+function handle(e) {
+  if (!e) return;
+  if (e.type === "recording") {
+    if (!stream) { voice.cancel(performance.now()); $("notice").textContent = "No microphone: nothing is recorded."; render(); return; }
+    const chunks = [];
+    const r = new MediaRecorder(stream);
+    r.ondataavailable = (ev) => { if (ev.data.size) chunks.push(ev.data); };
+    r.onstop = () => {
+      const done = r.result; // set by the stop/cancel below
+      if (done?.type !== "utterance") return; // rejected or cancelled: audio is discarded
+      done.utterance.audio = new Blob(chunks, { type: r.mimeType });
+      addToList(done.utterance);
+      sink(done.utterance);
+    };
+    r.start();
+    recorder = r;
+    $("notice").textContent = "";
+  } else {
+    // Only an event that ended the recording stops the recorder (a rejected double start must not).
+    if (recorder && !voice.view().recording) { recorder.result = e; if (recorder.state !== "inactive") recorder.stop(); recorder = null; }
+    if (e.type === "rejected") $("notice").textContent = `Not kept: ${e.reason}`;
+    if (e.type === "cancelled") $("notice").textContent = `Cancelled ${e.id}`;
+  }
+  render();
+}
+
+function addToList(u) {
+  const li = document.createElement("li");
+  const audio = document.createElement("audio");
+  audio.controls = true;
+  audio.src = URL.createObjectURL(u.audio);
+  const btn = document.createElement("button");
+  btn.textContent = "Transcribe";
+  const pre = document.createElement("pre");
+  const show = () => {
+    const { audio: _a, ...rest } = u;
+    pre.textContent = JSON.stringify({ ...rest, durationMs: Math.round(u.endT - u.startT), audio: `${u.audio.type} ${u.audio.size} B` }, null, 1);
+  };
+  btn.onclick = async () => {
+    try { u.transcript = await transcribe(u.audio); show(); }
+    catch (err) { pre.textContent = `Transcription failed: ${err.message}\n` + pre.textContent; }
+  };
+  li.append(audio, btn, pre);
+  show();
+  $("list").prepend(li);
+}
+
+addEventListener("keydown", (e) => {
+  if (e.key === "Escape") return handle(voice.cancel(performance.now()));
+  if (e.repeat) return;
+  const r = voice.key(performance.now(), e.code, true, getContext());
+  if (r) { e.preventDefault(); handle(r); }
+});
+addEventListener("keyup", (e) => handle(voice.key(performance.now(), e.code, false)));
+// A lost keyup/pointerup must not leave the microphone recording.
+addEventListener("blur", () => { if (voice.view().recording) handle(voice.cancel(performance.now())); });
+const ptt = $("ptt");
+ptt.addEventListener("pointerdown", (e) => { ptt.setPointerCapture(e.pointerId); handle(voice.start(performance.now(), getContext(), "button")); });
+for (const ev of ["pointerup", "pointercancel"]) ptt.addEventListener(ev, () => { if (voice.view().recording) handle(voice.stop(performance.now())); });
+
+// Level meter + max-duration cap.
+let analyser = null;
+const buf = new Float32Array(1024);
+function frame() {
+  const now = performance.now();
+  handle(voice.tick(now));
+  const v = voice.view();
+  $("elapsed").textContent = v.recording ? `${((now - v.startT) / 1000).toFixed(1)} s / ${voice.config.maxMs / 1000} s` : "–";
+  if (analyser) {
+    analyser.getFloatTimeDomainData(buf);
+    let s = 0; for (const x of buf) s += x * x;
+    $("level").value = Math.min(1, Math.sqrt(s / buf.length) * 4);
+    $("levelNote").textContent = v.recording ? "recording" : "listening for level only (not recorded)";
+  }
+  requestAnimationFrame(frame);
+}
+
+async function main() {
+  render();
+  requestAnimationFrame(frame);
+  if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+    $("err").textContent = "This browser has no getUserMedia/MediaRecorder (or the page is not on localhost/https).";
+    return;
+  }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+  } catch (e) {
+    const denied = e.name === "NotAllowedError" || e.name === "SecurityError";
+    $("err").textContent = denied
+      ? `Microphone permission denied (${e.name}). Allow microphone access for this page and reload.`
+      : `Microphone unavailable: ${e.name}: ${e.message}`;
+    return;
+  }
+  const ac = new AudioContext();
+  analyser = ac.createAnalyser();
+  analyser.fftSize = buf.length;
+  ac.createMediaStreamSource(stream).connect(analyser); // analyser only; not routed to speakers
+  addEventListener("pointerdown", () => ac.resume(), { once: true });
+  addEventListener("keydown", () => ac.resume(), { once: true });
+}
+main().catch((e) => { $("err").textContent = `Startup failed: ${e.message}`; });
+</script>
+</body>
+</html>

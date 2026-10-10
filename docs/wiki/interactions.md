@@ -57,6 +57,13 @@ is implemented in [surface/gestures](../../surface/gestures/README.md). It passe
 Live camera tracking, editor integration and latency are not yet verified.
 The README holds the event boundary for the adapter.
 
+**Voice status 2026-10-10:** push-to-talk capture is implemented in
+[surface/voice](../../surface/voice/README.md). Utterances snapshot the interaction context at start
+and carry gestures from a bounded window (2 s before start through release). Capture exists only
+while push-to-talk is held. Replay tests pass and are mutation-checked. The harness reports
+microphone denial. Live microphone capture, speaker bleed and speech-to-text (no provider chosen)
+are not verified. Target resolution and proposal creation remain DEV-92 work.
+
 ## Related pages
 
 [Wiki map](README.md) · [Architecture](architecture.md) · [Adaptation](adaptation.md) · [Acceptance](acceptance.md)
