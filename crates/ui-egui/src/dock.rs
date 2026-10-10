@@ -141,12 +141,7 @@ pub enum SplitSize {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum DockNode {
     /// `vertical`: children stacked top/bottom; else side by side.
-    Split {
-        vertical: bool,
-        size: SplitSize,
-        a: Box<DockNode>,
-        b: Box<DockNode>,
-    },
+    Split { vertical: bool, size: SplitSize, a: Box<DockNode>, b: Box<DockNode> },
     Tabs {
         panels: Vec<PanelKind>,
         active: usize,
@@ -190,7 +185,8 @@ fn vsplit(size: SplitSize, a: DockNode, b: DockNode) -> DockNode {
 /// The chat-first workspace new users start in (see [`WorkspacePrefs::shway_default`]).
 pub const SHWAY: &str = "Shway";
 
-pub const WORKSPACES: [&str; 11] = ["Shway", "Pro", "Editing", "Assembly", "Color", "Effects", "Audio", "Captions and Graphics", "Learning", "Review", "All Panels"];
+pub const WORKSPACES: [&str; 11] =
+    ["Shway", "Pro", "Editing", "Assembly", "Color", "Effects", "Audio", "Captions and Graphics", "Learning", "Review", "All Panels"];
 
 /// The user's workspaces file, beside `preferences.json` in the data directory.
 pub const WORKSPACES_FILE: &str = "workspaces.json";

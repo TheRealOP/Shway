@@ -97,10 +97,6 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     if btn(ui, focus_icon, "focusMode", tl!("Focus Mode"), app).clicked() {
         run(app, "view.focusMode");
     }
-    let chat = crate::dock::PanelKind::Assistant;
-    if btn(ui, Icon::Chat, "assistant", tl!("Show or hide the Assistant"), app).clicked() {
-        run(app, &crate::menus::panel_toggle_id(chat));
-    }
     if btn(ui, Icon::Speaker, "volume", tl!("Volume"), app).clicked() {
         app.ui.status = tl!("Master volume: use the Audio Track Mixer").into();
     }
@@ -111,7 +107,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         app.ui.mode = Mode::Export;
     }
     // Quick Export: a popup with File Name & Location, a preset list and Export (Premiere 26)
-    let qx = rect.max.x - 14.0 - 6.0 * 38.0; // the seventh button from the right
+    let qx = rect.max.x - 14.0 - 5.0 * 38.0; // the sixth button from the right
     if btn(ui, Icon::Export, "quickExport", tl!("Quick Export"), app).clicked() {
         app.ui.export.quick_open = !app.ui.export.quick_open;
         ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("quick-export-toggled"), true));
@@ -144,7 +140,6 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 t.tab_text_active,
             );
         }
-
     }
     let popup_id = egui::Id::new("workspaces-popup");
     if ws_resp.clicked() || wresp.clicked() {

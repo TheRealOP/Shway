@@ -673,8 +673,7 @@ impl FilmcraftApp {
     /// View ▸ Panels ▸ <panel>: hide a panel that is on show (it keeps its place), or show it
     /// again where it was. Returns whether it is now shown.
     pub fn toggle_panel(&mut self, p: PanelKind) -> bool {
-        let shown = self.ui.dock.contains(p) && !self.ui.dock.is_hidden(p) && (!self.ui.focus_mode || dock::focus_keeps(p));
-        if shown {
+        if menus::panel_shown(self, p) {
             self.ui.dock.hide(p);
             if self.ui.focused == p {
                 self.ui.focused = PanelKind::Program;
