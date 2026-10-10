@@ -277,6 +277,8 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let ui = &mut child;
     let v = ui.visuals().clone();
     let (accent, on_accent, text, weak) = (v.selection.bg_fill, v.selection.stroke.color, v.text_color(), v.weak_text_color());
+    // a raised surface: a faint wash of the text colour, so it shows on any panel background
+    let surface = text.gamma_multiply(0.07);
     if cfg!(target_arch = "wasm32") {
         ui.label(RichText::new(tl!("The assistant is available in the desktop app.")).color(weak));
         return;
@@ -300,146 +302,150 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let st = &mut app.ui.assistant;
     let body = |s: &str| RichText::new(s).size(BODY).line_height(Some(LINE));
     ui.spacing_mut().item_spacing.y = GAP;
-    ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-        // composer: an input that grows to six lines, with the send button inside
-        let can_send = !st.waiting && !st.draft.trim().is_empty();
-        egui::Frame::new()
-            .fill(v.extreme_bg_color)
-            .stroke(if focused { egui::Stroke::new(1.0, accent) } else { v.widgets.inactive.bg_stroke })
-            .corner_radius(RADIUS)
-            .inner_margin(egui::Margin { left: 12, right: 6, top: 6, bottom: 6 })
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Max), |ui| {
-                    let fill = if can_send { accent } else { v.widgets.inactive.weak_bg_fill };
-                    let arrow = RichText::new("↑").size(17.0).strong().color(if can_send { on_accent } else { weak });
-                    let b = ui.add_enabled(can_send, egui::Button::new(arrow).fill(fill).corner_radius(255).min_size(vec2(32.0, 32.0)));
-                    elems.push(("assistant.send".into(), b.rect, "Send".into()));
-                    do_send |= b.clicked();
-                    egui::ScrollArea::vertical().id_salt("assistant-input-scroll").max_height(MAX_INPUT_LINES * LINE + 12.0).show(ui, |ui| {
-                        let edit = egui::TextEdit::multiline(&mut st.draft)
-                            .id(edit_id)
-                            .frame(egui::Frame::NONE)
-                            .font(egui::FontId::proportional(BODY))
-                            .desired_rows(1)
-                            .desired_width(ui.available_width())
-                            .margin(egui::Margin::symmetric(0, 6))
-                            .hint_text(tl!("Ask for an edit…"));
-                        let r = ui.add(edit);
-                        elems.push(("assistant.input".into(), r.rect, "Message".into()));
-                    });
-                });
-            });
-        // the proposed edit, waiting for a decision
-        if let Some(p) = &st.pending {
-            let card = egui::Frame::new().fill(v.faint_bg_color).stroke(egui::Stroke::new(1.0, accent)).corner_radius(RADIUS).inner_margin(12).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.spacing_mut().item_spacing.y = 6.0;
-                ui.label(RichText::new(tl!("PROPOSED EDIT")).small().strong().color(accent));
-                ui.add(egui::Label::new(body(&p.label).color(text)).wrap());
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    let w = ((ui.available_width() - ui.spacing().item_spacing.x) / 2.0).max(40.0);
-                    let accept =
-                        egui::Button::new(RichText::new(tl!("Accept")).strong().color(on_accent)).fill(accent).corner_radius(10).min_size(vec2(w, 32.0));
-                    let ok = ui.add_enabled(!st.waiting, accept);
-                    let no = ui.add_enabled(!st.waiting, egui::Button::new(tl!("Reject")).corner_radius(10).min_size(vec2(w, 32.0)));
-                    elems.push(("assistant.accept".into(), ok.rect, "Accept".into()));
-                    elems.push(("assistant.reject".into(), no.rect, "Reject".into()));
-                    if ok.clicked() {
-                        decision = Some(true);
-                    }
-                    if no.clicked() {
-                        decision = Some(false);
-                    }
-                });
-            });
-            elems.push(("assistant.pending".into(), card.response.rect, p.label.clone()));
-        }
-        // errors; an unreachable service gets the command that starts it
-        if let Some(e) = &st.error {
-            let red = v.error_fg_color;
-            let frame = egui::Frame::new()
-                .fill(red.gamma_multiply(0.12))
-                .stroke(egui::Stroke::new(1.0, red.gamma_multiply(0.5)))
-                .corner_radius(RADIUS)
-                .inner_margin(12);
-            let banner = frame.show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.spacing_mut().item_spacing.y = 6.0;
-                if e == NOT_RUNNING {
-                    ui.label(body(tl!("The assistant isn't running")).strong().color(text));
-                    ui.add(egui::Label::new(RichText::new(tl!("Start it in a terminal, then send your message again:")).color(weak)).wrap());
-                    egui::Frame::new().fill(v.extreme_bg_color).corner_radius(8).inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.add(egui::Label::new(RichText::new(START_COMMAND).monospace().color(text)).wrap());
-                    });
-                } else {
-                    ui.add(egui::Label::new(body(crate::i18n::t(e)).color(text)).wrap());
-                }
-            });
-            elems.push(("assistant.error".into(), banner.response.rect, e.clone()));
-        }
-        // conversation (fills the rest, newest at the bottom; follows new messages unless scrolled up)
-        ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-            egui::ScrollArea::vertical().id_salt("assistant-conversation").auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 4.0;
-                let max_w = (ui.available_width() * 0.85).min(560.0);
-                if st.messages.is_empty() && !st.thinking() {
-                    ui.add_space((ui.available_height() * 0.18).max(8.0));
-                    ui.vertical_centered(|ui| {
-                        ui.label(RichText::new(tl!("Edit by chatting")).size(18.0).strong().color(text));
-                        ui.add(egui::Label::new(RichText::new(tl!("Describe a change; you preview it before it lands.")).color(weak)).wrap());
-                    });
-                    ui.add_space(14.0);
-                    ui.spacing_mut().item_spacing.y = 8.0;
-                    for (i, s) in SUGGESTIONS.iter().enumerate() {
-                        let b = egui::Button::new(body(crate::i18n::t(s)).color(text))
-                            .fill(v.faint_bg_color)
-                            .stroke(v.widgets.noninteractive.bg_stroke)
-                            .corner_radius(RADIUS)
-                            .wrap()
-                            .min_size(vec2(ui.available_width(), 38.0));
-                        let r = ui.add_enabled(!st.waiting, b);
-                        elems.push((format!("assistant.suggestion.{i}"), r.rect, (*s).to_string()));
-                        if r.clicked() {
-                            suggestion = Some(*s);
-                        }
-                    }
-                }
-                let mut prev: Option<&str> = None;
-                for (i, m) in st.messages.iter().enumerate() {
-                    let user = m.role == "user";
-                    let align = if user { egui::Align::Max } else { egui::Align::Min };
-                    ui.with_layout(egui::Layout::top_down(align), |ui| {
-                        if prev != Some(m.role.as_str()) {
-                            ui.add_space(if prev.is_some() { 10.0 } else { 0.0 });
-                            ui.label(RichText::new(if user { tl!("You") } else { tl!("Assistant") }).small().color(weak));
-                        }
-                        let fill = if user { accent.gamma_multiply(0.28) } else { v.faint_bg_color };
-                        let r = egui::Frame::new().fill(fill).corner_radius(bubble_radius(user)).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
-                            ui.set_max_width(max_w);
-                            ui.add(egui::Label::new(body(&m.text).color(text)).wrap().selectable(true))
+    egui::Panel::bottom("assistant-bottom")
+        .resizable(false)
+        .show_separator_line(false)
+        .frame(egui::Frame::NONE.inner_margin(egui::Margin { top: GAP as i8, ..Default::default() }))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = GAP;
+            // errors; an unreachable service gets the command that starts it
+            if let Some(e) = &st.error {
+                let red = v.error_fg_color;
+                let frame = egui::Frame::new()
+                    .fill(red.gamma_multiply(0.12))
+                    .stroke(egui::Stroke::new(1.0, red.gamma_multiply(0.5)))
+                    .corner_radius(RADIUS)
+                    .inner_margin(12);
+                let banner = frame.show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.spacing_mut().item_spacing.y = 6.0;
+                    if e == NOT_RUNNING {
+                        ui.label(body(tl!("The assistant isn't running")).strong().color(text));
+                        ui.add(egui::Label::new(RichText::new(tl!("Start it in a terminal, then send your message again:")).color(weak)).wrap());
+                        egui::Frame::new().fill(v.extreme_bg_color).corner_radius(8).inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.add(egui::Label::new(RichText::new(START_COMMAND).monospace().color(text)).wrap());
                         });
-                        elems.push((format!("assistant.message.{i}"), r.response.rect, m.role.clone()));
+                    } else {
+                        ui.add(egui::Label::new(body(crate::i18n::t(e)).color(text)).wrap());
+                    }
+                });
+                elems.push(("assistant.error".into(), banner.response.rect, e.clone()));
+            }
+            // the proposed edit, waiting for a decision
+            if let Some(p) = &st.pending {
+                let card = egui::Frame::new().fill(surface).stroke(egui::Stroke::new(1.0, accent)).corner_radius(RADIUS).inner_margin(12).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.spacing_mut().item_spacing.y = 6.0;
+                    ui.label(RichText::new(tl!("PROPOSED EDIT")).small().strong().color(accent));
+                    ui.add(egui::Label::new(body(&p.label).color(text)).wrap());
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        let w = ((ui.available_width() - ui.spacing().item_spacing.x) / 2.0).max(40.0);
+                        let accept =
+                            egui::Button::new(RichText::new(tl!("Accept")).strong().color(on_accent)).fill(accent).corner_radius(10).min_size(vec2(w, 32.0));
+                        let ok = ui.add_enabled(!st.waiting, accept);
+                        let no = ui.add_enabled(!st.waiting, egui::Button::new(tl!("Reject")).corner_radius(10).min_size(vec2(w, 32.0)));
+                        elems.push(("assistant.accept".into(), ok.rect, "Accept".into()));
+                        elems.push(("assistant.reject".into(), no.rect, "Reject".into()));
+                        if ok.clicked() {
+                            decision = Some(true);
+                        }
+                        if no.clicked() {
+                            decision = Some(false);
+                        }
                     });
-                    prev = Some(m.role.as_str());
+                });
+                elems.push(("assistant.pending".into(), card.response.rect, p.label.clone()));
+            }
+            // composer: an input that grows to six lines, with the send button inside
+            let can_send = !st.waiting && !st.draft.trim().is_empty();
+            egui::Frame::new()
+                .fill(v.extreme_bg_color)
+                .stroke(if focused { egui::Stroke::new(1.0, accent) } else { v.widgets.inactive.bg_stroke })
+                .corner_radius(RADIUS)
+                .inner_margin(egui::Margin { left: 12, right: 6, top: 6, bottom: 6 })
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        let send_w = 32.0;
+                        let input_w = (ui.available_width() - send_w - ui.spacing().item_spacing.x).max(40.0);
+                        egui::ScrollArea::vertical().id_salt("assistant-input-scroll").max_height(MAX_INPUT_LINES * LINE + 12.0).show(ui, |ui| {
+                            let edit = egui::TextEdit::multiline(&mut st.draft)
+                                .id(edit_id)
+                                .frame(egui::Frame::NONE)
+                                .font(egui::FontId::proportional(BODY))
+                                .desired_rows(1)
+                                .desired_width(input_w)
+                                .margin(egui::Margin::symmetric(0, 6))
+                                .hint_text(tl!("Ask for an edit…"));
+                            let r = ui.add(edit);
+                            elems.push(("assistant.input".into(), r.rect, "Message".into()));
+                        });
+                        let fill = if can_send { accent } else { v.widgets.inactive.weak_bg_fill };
+                        let arrow = RichText::new("↑").size(17.0).strong().color(if can_send { on_accent } else { weak });
+                        let b = ui.add_enabled(can_send, egui::Button::new(arrow).fill(fill).corner_radius(255).min_size(vec2(send_w, send_w)));
+                        elems.push(("assistant.send".into(), b.rect, "Send".into()));
+                        do_send |= b.clicked();
+                    });
+                });
+        });
+    // conversation (fills the rest, newest at the bottom; follows new messages unless scrolled up)
+    egui::CentralPanel::no_frame().show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt("assistant-conversation").auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 4.0;
+            let max_w = (ui.available_width() * 0.85).min(560.0);
+            if st.messages.is_empty() && !st.thinking() {
+                ui.add_space((ui.available_height() * 0.18).max(8.0));
+                ui.vertical_centered(|ui| {
+                    ui.label(RichText::new(tl!("Edit by chatting")).size(18.0).strong().color(text));
+                    ui.add(egui::Label::new(RichText::new(tl!("Describe a change; you preview it before it lands.")).color(weak)).wrap());
+                });
+                ui.add_space(14.0);
+                ui.spacing_mut().item_spacing.y = 8.0;
+                for (i, s) in SUGGESTIONS.iter().enumerate() {
+                    let b = egui::Button::new(body(crate::i18n::t(s)).color(text))
+                        .fill(surface)
+                        .stroke(v.widgets.noninteractive.bg_stroke)
+                        .corner_radius(RADIUS)
+                        .wrap()
+                        .min_size(vec2(ui.available_width(), 38.0));
+                    let r = ui.add_enabled(!st.waiting, b);
+                    elems.push((format!("assistant.suggestion.{i}"), r.rect, (*s).to_string()));
+                    if r.clicked() {
+                        suggestion = Some(*s);
+                    }
                 }
-                if st.thinking() {
-                    ui.add_space(10.0);
-                    let r = egui::Frame::new().fill(v.faint_bg_color).corner_radius(bubble_radius(false)).inner_margin(egui::Margin::symmetric(12, 8)).show(
-                        ui,
-                        |ui| {
-                            ui.horizontal(|ui| {
-                                ui.add(egui::Spinner::new().size(12.0).color(weak));
-                                ui.label(body(tl!("Thinking…")).color(weak));
-                            });
-                        },
-                    );
-                    elems.push(("assistant.thinking".into(), r.response.rect, "Thinking…".into()));
-                }
-                ui.add_space(4.0);
-            });
+            }
+            let mut prev: Option<&str> = None;
+            for (i, m) in st.messages.iter().enumerate() {
+                let user = m.role == "user";
+                let align = if user { egui::Align::Max } else { egui::Align::Min };
+                ui.with_layout(egui::Layout::top_down(align), |ui| {
+                    if prev != Some(m.role.as_str()) {
+                        ui.add_space(if prev.is_some() { 10.0 } else { 0.0 });
+                        ui.label(RichText::new(if user { tl!("You") } else { tl!("Assistant") }).small().color(weak));
+                    }
+                    let fill = if user { accent.gamma_multiply(0.28) } else { surface };
+                    let r = egui::Frame::new().fill(fill).corner_radius(bubble_radius(user)).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+                        ui.set_max_width(max_w);
+                        ui.add(egui::Label::new(body(&m.text).color(text)).wrap().selectable(true))
+                    });
+                    elems.push((format!("assistant.message.{i}"), r.response.rect, m.role.clone()));
+                });
+                prev = Some(m.role.as_str());
+            }
+            if st.thinking() {
+                ui.add_space(10.0);
+                let r = egui::Frame::new().fill(surface).corner_radius(bubble_radius(false)).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Spinner::new().size(12.0).color(weak));
+                        ui.label(body(tl!("Thinking…")).color(weak));
+                    });
+                });
+                elems.push(("assistant.thinking".into(), r.response.rect, "Thinking…".into()));
+            }
+            ui.add_space(4.0);
         });
     });
     for (id, r, label) in elems {
