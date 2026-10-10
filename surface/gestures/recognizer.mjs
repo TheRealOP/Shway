@@ -42,12 +42,14 @@ export const DEFAULTS = {
   swipeCooldownMs: 700,
   quietAfterReleaseMs: 400, // no swipes right after an engagement ends
   mirrored: false, // true when landmarks come from a mirrored (selfie) image
-  tapOn: 0.3, // thumb–middle tip distance / palm length: closed below, open above tapOff
-  tapOff: 0.45,
+  aspect: 4 / 3, // image width / height, so on-screen distances aren't stretched
+  tapOn: 0.35, // thumb–middle tip distance / palm length (nearer of 3D and on-screen): closed below, open above tapOff
+  tapOff: 0.5,
+  tapIndexRatio: 1.2, // thumb at least this many times nearer the middle tip than the index tip
   tapMaxMs: 350, // a tap closes and opens within this
   doubleTapGapMs: 400, // second tap must start within this of the first ending
-  chopMinDist: 0.2, // downward palm travel, fraction of image height, within swipeWindowMs
-  chopMaxOffAxis: 0.5, // max |dx| / dy
+  chopMinPalms: 0.7, // downward fingertip travel, in on-screen palm lengths, within swipeWindowMs
+  chopMaxOffAxis: 2.5, // max |dx| / dy: a flick swings the tips in an arc, so allow diagonal
   chopBladeMax: 0.6, // knuckle line's share facing the camera: below = hand edge-on (a blade)
   fingerStraight: 1.5, // fingertip reaches this × its knuckle's distance from the wrist
   chopCooldownMs: 1000,
@@ -90,6 +92,11 @@ function across(/** @type {P3[]} */ w, /** @type {P3} */ axis) {
   return l < 1e-9 ? null : scale(p, 1 / l);
 }
 
+/** On-screen distance between two landmarks, x scaled by the aspect ratio. */
+function imageDist(/** @type {P3[]} */ w, /** @type {number} */ a, /** @type {number} */ b, /** @type {number} */ aspect) {
+  return Math.hypot((w[a].x - w[b].x) * aspect, w[a].y - w[b].y);
+}
+
 /** Flat straight hand turned edge-on to the camera, like a blade. */
 function isBlade(/** @type {P3[]} */ w, /** @type {typeof DEFAULTS} */ c) {
   const straight = FINGERS.every(([m, t]) => len(sub(w[t], w[WRIST])) > c.fingerStraight * len(sub(w[m], w[WRIST])));
@@ -117,11 +124,13 @@ export function createRecognizer(config = {}) {
   let fine = false;
   let detent = 0;
   let cooldownUntil = -Infinity;
-  /** @type {{t: number, x: number, y: number, blade: boolean}[]} */ let track = [];
+  /** @type {{t: number, x: number, y: number, tipX: number, tipY: number, palm: number, blade: boolean}[]} */ let track = [];
   let tapping = false; // thumb–middle closed
   let tapStart = -Infinity;
   let lastTap = -Infinity; // end of a single tap awaiting its pair
   let blade = false; // hand currently chop-ready, for feedback
+  let middleRatio = Infinity; // thumb–middle closeness, for feedback
+  let chopTravel = 0; // fingertip drop so far in the window, palm lengths, for feedback
   let confidence = 0;
   let pinchRatio = Infinity; // last thumb–index / palm ratio, for feedback
 
@@ -153,6 +162,7 @@ export function createRecognizer(config = {}) {
     const h = usableHand(f.hand, c.minScore);
     let tapEnded = false;
     blade = false;
+    chopTravel = 0;
     confidence = Number.isFinite(f.hand?.score) ? Number(f.hand?.score) : 0;
     if (h) {
       const palm = len(sub(h.world[MIDDLE_MCP], h.world[WRIST]));
@@ -160,13 +170,20 @@ export function createRecognizer(config = {}) {
       pinchRatio = pinch;
       const middle = len(sub(h.world[THUMB_TIP], h.world[MIDDLE_TIP])) / palm;
       pinching = pinching ? pinch < c.pinchOff : pinch < c.pinchOn && middle > pinch * c.pinchIndexOnly;
+      // Turned hands hide the fingertips and their depth estimate gets noisy; when the tips touch,
+      // their on-screen distance stays small, so take the nearer of the two.
+      const imgPalm = Math.max(1e-9, imageDist(h.image, WRIST, MIDDLE_MCP, c.aspect));
+      const close = Math.min(middle, imageDist(h.image, THUMB_TIP, MIDDLE_TIP, c.aspect) / imgPalm);
+      const indexClose = Math.min(pinch, imageDist(h.image, THUMB_TIP, INDEX_TIP, c.aspect) / imgPalm);
+      middleRatio = close;
       const wasTapping = tapping;
-      tapping = tapping ? middle < c.tapOff : middle < c.tapOn && pinch > middle * c.pinchIndexOnly;
+      tapping = tapping ? close < c.tapOff : close < c.tapOn && indexClose > close * c.tapIndexRatio;
       if (tapping && !wasTapping) tapStart = t;
       if (!tapping && wasTapping) tapEnded = true;
     } else {
       pinching = false;
       tapping = false;
+      middleRatio = Infinity;
       pinchRatio = Infinity;
     }
     const engage = Boolean(f.key) || pinching;
@@ -236,7 +253,7 @@ export function createRecognizer(config = {}) {
       }
     }
     if (!h || engage) {
-      track = [];
+      if (engage) track = []; // a dropped frame mid-flick (motion blur) keeps the window
       lastTap = -Infinity;
       return out;
     }
@@ -250,13 +267,17 @@ export function createRecognizer(config = {}) {
     const w = h.image;
     const x = (w[WRIST].x + w[INDEX_MCP].x + w[PINKY_MCP].x) / 3;
     const y = (w[WRIST].y + w[INDEX_MCP].y + w[PINKY_MCP].y) / 3;
+    // Fingertips, not the palm: a wrist flick swings the fingers while the palm barely moves.
+    const tipX = (w[INDEX_TIP].x + w[MIDDLE_TIP].x) / 2 * c.aspect;
+    const tipY = (w[INDEX_TIP].y + w[MIDDLE_TIP].y) / 2;
     blade = isBlade(h.world, c);
-    track.push({ t, x, y, blade });
+    track.push({ t, x, y, tipX, tipY, palm: imageDist(w, WRIST, MIDDLE_MCP, c.aspect), blade });
     track = track.filter((s) => s.t >= t - c.swipeWindowMs);
     const first = track[0];
-    if (t >= cooldownUntil && first && track.every((s) => s.blade)) {
-      const dx = x - first.x, dy = y - first.y; // image y grows downward
-      if (dy >= c.chopMinDist && Math.abs(dx) <= c.chopMaxOffAxis * dy) {
+    if (first?.blade && first.palm > 1e-6) { // in chop pose when the motion began
+      const dx = tipX - first.tipX, dy = tipY - first.tipY; // image y grows downward
+      chopTravel = dy / first.palm;
+      if (t >= cooldownUntil && chopTravel >= c.chopMinPalms && Math.abs(dx) <= c.chopMaxOffAxis * dy) {
         out.push({ type: "chop", t });
         cooldownUntil = t + c.chopCooldownMs; // also blocks swipes from the follow-through
         track = [];
@@ -277,7 +298,7 @@ export function createRecognizer(config = {}) {
   }
 
   /** UI snapshot: mode, effect and confidence must stay visible. */
-  const view = () => ({ state, rate, fine, angleDeg: angle, handedness, confidence, pinching, pinchRatio, tapping, blade });
+  const view = () => ({ state, rate, fine, angleDeg: angle, handedness, confidence, pinching, pinchRatio, tapping, blade, middleRatio, chopTravel });
 
   return { step, view };
 }

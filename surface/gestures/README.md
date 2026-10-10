@@ -26,13 +26,17 @@ The FST's `Targeting / Preview / Committed` belong to edit proposals (DEV-92), n
   gives a net 0. Toggling modes stops the shuttle and never jumps.
 - **Swipe:** only in `Idle`, unpinched. Palm travel ≥ 18% of image width within 250 ms, mostly horizontal.
   700 ms cooldown, plus 400 ms quiet after any release. Slow drift and diagonal motion don't count.
-- **Double tap:** only in `Idle`. Two thumb–middle taps (tip distance / palm < 0.3, reopen > 0.45; thumb
-  1.5× nearer the middle tip than the index tip), each ≤ 350 ms closed, the second starting ≤ 400 ms
-  after the first ends. A hold or a tracking gap resets it.
-- **Chop:** only in `Idle`. All four fingers straight, the hand edge-on to the camera (a blade), with
-  palm travel ≥ 20% of image height downward within 250 ms, mostly vertical. Every sample in the window
-  must be blade-shaped. 1 s cooldown, which also blocks swipes. Palm-facing drops, curled hands,
-  slow or upward moves don't count.
+- **Double tap:** only in `Idle`. Two thumb–middle taps, each ≤ 350 ms closed, the second starting
+  ≤ 400 ms after the first ends. "Closed" means tip distance / palm length < 0.35 (reopen > 0.5), using
+  the nearer of the 3D and on-screen measures. A turned hand hides the tips and makes the 3D depth
+  noisy, but touching tips stay close on screen. The thumb must also be 1.2× nearer the middle tip than
+  the index tip. A hold or a tracking gap resets it.
+- **Chop:** only in `Idle`. The hand must be in blade pose (four fingers straight, edge-on to the camera)
+  when the motion starts. Then the index/middle fingertips must drop ≥ 0.7 on-screen palm lengths
+  within 250 ms. Fingertips are tracked, not the palm, because a wrist flick barely moves the palm.
+  Diagonal arcs are allowed (|dx| ≤ 2.5 dy). A dropped frame from motion blur doesn't reset the window.
+  1 s cooldown, which also blocks swipes. Palm-facing drops, curled hands, slow or upward moves, and
+  sideways blade swipes don't cut.
 - **Loss:** no hand, confidence < 0.6, malformed/non-finite landmarks, or a handedness flip while
   engaged → `shuttle 0` + `tracking-lost`. The same for Esc → `cancel`. Control stays latched until
   engagement is released, then needs a fresh engage (new neutral).
@@ -44,7 +48,7 @@ The FST's `Targeting / Preview / Committed` belong to edit proposals (DEV-92), n
 import { createRecognizer } from "./recognizer.mjs";
 const r = createRecognizer(/* optional overrides of DEFAULTS */);
 for (const e of r.step(frame)) adapter(e);   // frame: {t, hand, key, fine, cancel}
-r.view();  // {state, rate, fine, angleDeg, handedness, confidence, pinching, pinchRatio, tapping, blade} for on-screen feedback
+r.view();  // {state, rate, fine, angleDeg, handedness, confidence, pinching, pinchRatio, tapping, blade, middleRatio, chopTravel} for on-screen feedback
 ```
 
 `camera.html` exposes `window.shwayGestures.setSink(fn)` to replace its log sink.

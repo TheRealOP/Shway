@@ -35,6 +35,9 @@
       <dt>twist</dt><dd id="angle">–</dd>
       <dt>rate</dt><dd id="rate">0</dd>
       <dt>hand</dt><dd id="hand">–</dd>
+      <dt>thumb–index</dt><dd id="pinch">–</dd>
+      <dt>thumb–middle</dt><dd id="middle">–</dd>
+      <dt>chop travel</dt><dd id="chop">–</dd>
       <dt>feedback p95</dt><dd id="lat">–</dd>
       <dt>recording</dt><dd id="rec">off (R)</dd>
     </dl>
@@ -51,10 +54,10 @@ const $ = (id) => document.getElementById(id);
 const keys = { key: false, fine: false, cancel: false };
 const rec = { on: false, frames: [] };
 const lat = [];
-const recognizer = createRecognizer();
+let recognizer = createRecognizer(); // recreated with the camera's aspect once it starts
 // Events cross the integration boundary here. Codex's adapter replaces this sink.
 const sink = (e) => { $("log").textContent = `${e.t.toFixed(0)} ${JSON.stringify(e)}\n` + $("log").textContent.slice(0, 4000); };
-window.shwayGestures = { recognizer, setSink: (f) => { sinkFn = f; }, drawOverlay };
+window.shwayGestures = { get recognizer() { return recognizer; }, setSink: (f) => { sinkFn = f; }, drawOverlay };
 let sinkFn = sink;
 
 addEventListener("keydown", (e) => {
@@ -188,6 +191,8 @@ async function main() {
     $("err").textContent = `Camera unavailable: ${e.name}: ${e.message}. Space still engages, but twist needs a hand.`;
     return;
   }
+  await new Promise((ok) => (video.readyState >= 1 ? ok() : video.addEventListener("loadedmetadata", ok, { once: true })));
+  if (video.videoWidth && video.videoHeight) recognizer = createRecognizer({ aspect: video.videoWidth / video.videoHeight });
   const { FilesetResolver, HandLandmarker } = await import(`${VISION}/vision_bundle.mjs`);
   const fileset = await FilesetResolver.forVisionTasks(`${VISION}/wasm`);
   const landmarker = await HandLandmarker.createFromOptions(fileset, {
@@ -220,6 +225,10 @@ async function main() {
       $("mode").textContent = v.fine ? "fine (frame step)" : "shuttle";
       $("angle").textContent = `${v.angleDeg.toFixed(1)}°`;
       $("rate").textContent = `${v.rate}×`;
+      const fmt = (x) => (Number.isFinite(x) ? x.toFixed(2) : "–");
+      $("pinch").textContent = `${fmt(v.pinchRatio)} (pinch < ${C.pinchOn})`;
+      $("middle").textContent = `${fmt(v.middleRatio)} (tap < ${C.tapOn})${v.tapping ? " · closed" : ""}`;
+      $("chop").textContent = `${fmt(v.chopTravel)} / ${C.chopMinPalms} palms${v.blade ? " · blade" : ""}`;
       $("hand").textContent = hand ? `${v.handedness} ${(v.confidence * 100).toFixed(0)}%${v.pinching ? " · pinch" : ""}` : "none";
       requestAnimationFrame(() => {
         lat.push(performance.now() - t0);

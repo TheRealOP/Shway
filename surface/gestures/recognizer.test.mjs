@@ -20,7 +20,9 @@ const rand = () => ((seed = (seed * 16807) % 2147483647) / 2147483647 - 0.5);
 
 /** One hand pose: twist (deg about the forearm), image position, pinch, jitter. */
 // pinch: true = thumb to index tip; "middle" = thumb to middle tip; "fist" = fingers curled onto the thumb.
-function hand({ twist = 0, x = 0.5, y = 0.5, pinch = false, left = false, score = 0.95, jitter = 0.0015 } = {}) {
+// bend: wrist flick, degrees the fingers swing in the image plane. thumbZ: depth-estimate error on the thumb tip.
+function hand({ twist = 0, x = 0.5, y = 0.5, pinch = false, left = false, score = 0.95, jitter = 0.0015, bend = 0, thumbZ = 0 } = {}) {
+  const b = (bend * Math.PI) / 180;
   const a = (twist * Math.PI) / 180;
   const pose = pinch === "fist"
     ? BASE.map(([px, py], i) => (i % 4 === 0 && i > 4 ? [px * 0.5 - 0.02, 0.07] : i === 4 ? [-0.025, 0.075] : [px, py]))
@@ -32,9 +34,11 @@ function hand({ twist = 0, x = 0.5, y = 0.5, pinch = false, left = false, score 
     const wz = 0;
     // rotate about +y, then mirror x for a left hand
     let rx = wx * Math.cos(a) + wz * Math.sin(a);
-    const rz = -wx * Math.sin(a) + wz * Math.cos(a);
+    const rz = -wx * Math.sin(a) + wz * Math.cos(a) + (i === 4 ? thumbZ : 0);
+    const by = wy * Math.cos(b) - rx * Math.sin(b);
+    rx = rx * Math.cos(b) + wy * Math.sin(b);
     if (left) rx = -rx;
-    return { x: rx + rand() * jitter, y: wy + rand() * jitter, z: rz + rand() * jitter };
+    return { x: rx + rand() * jitter, y: by + rand() * jitter, z: rz + rand() * jitter };
   });
   const image = world.map((p) => ({ x: x + p.x * 1.5, y: y - p.y * 1.5, z: p.z }));
   return { world, image, handedness: left ? "Left" : "Right", score };
@@ -256,6 +260,20 @@ test("a tap interrupted by tracking loss does not pair up", () => {
   assert.deepEqual(evs, []);
 });
 
+test("a wrist flick (palm still, fingers swing down) cuts", () => {
+  const still = frames(0, 300, () => ({ hand: hand({ twist: 75 }) }));
+  const flick = frames(330, 150, (p) => ({ hand: hand({ twist: 75, bend: 70 * p }) }));
+  assert.deepEqual(types(replay([...still, ...flick])), ["chop"]);
+  // Motion blur drops a frame mid-flick.
+  const blurred = flick.map((f, i) => (i === 2 ? { t: f.t, hand: null } : f));
+  assert.deepEqual(types(replay([...still, ...blurred])), ["chop"]);
+});
+
+test("a sideways thumb–middle double tap with noisy fingertip depth still fires", () => {
+  const evs = replay(taps([[0, 300], [1, 100], [0, 130], [1, 100], [0, 300]], { twist: 60, thumbZ: 0.03 }));
+  assert.deepEqual(types(evs), ["double-tap"]);
+});
+
 const chop = (t0, opts = {}) => frames(t0, 200, (p) => ({ hand: hand({ twist: 75, y: 0.3 + 0.3 * p, ...opts }) }));
 
 test("a downward edge-on straight-hand chop fires one cut", () => {
@@ -273,6 +291,11 @@ test("palm-facing drops, curled hands, slow moves and upward moves don't cut", (
   assert.deepEqual(replay(chop(0, { pinch: "fist" })), [], "fist");
   assert.deepEqual(replay(frames(0, 2000, (p) => ({ hand: hand({ twist: 75, y: 0.3 + 0.3 * p }) }))), [], "slow");
   assert.deepEqual(replay(frames(0, 200, (p) => ({ hand: hand({ twist: 75, y: 0.6 - 0.3 * p }) }))), [], "upward");
+});
+
+test("a sideways swipe in blade pose is a swipe, not a cut", () => {
+  const evs = replay(frames(0, 200, (p) => ({ hand: hand({ twist: 75, x: 0.7 - 0.4 * p }) })));
+  assert.deepEqual(types(evs), ["swipe"]);
 });
 
 test("chop is suppressed while engaged", () => {
