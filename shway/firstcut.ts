@@ -1,6 +1,8 @@
 // StoryBrief + AI first-cut planning (DEV-89/DEV-90). The model only chooses among indexed takes by
 // opaque index; every source time comes from the take index, never from model output.
 import type {Take} from "./takes.ts";
+import {alignRange} from "./adapter.ts";
+import type {ShwayAdapter, ProposalPreview} from "./adapter.ts";
 
 export const MAX_BRIEF_TEXT = 500;
 export const MAX_BRIEF_LIST = 20;
@@ -152,20 +154,19 @@ export async function planFirstCut({brief, script, takes, generate}: {brief: Sto
   return fail(`model returned an invalid first cut twice: ${error}`);
 }
 
-/** The adapter surface the first cut needs (ShwayAdapter.inspect + DEV-90's ShwayAdapter.assemble). */
-export interface FirstCutAdapter {
-  inspect(): Promise<{project: {revision: number; activeSequence: number | null}}>;
-  assemble(input: {expectedRevision: number; sequence: number; label: string; ranges: FirstCutRange[]}): Promise<{token: number}>;
-}
 /**
- * Stage the planned ranges, in script order, on the active sequence as one proposal preview.
- * Returns the adapter's preview: `adapter.commit(preview.token)` (one undo step) or `cancel` it.
+ * Stage the planned ranges, in script order, after the active sequence's content (V1 + linked A1)
+ * as one proposal preview. Ranges widen outward to the sequence frame grid (`alignRange`).
+ * Returns the adapter's ProposalPreview: `adapter.commit(preview.token)` (one undo step) or `cancel` it.
  */
-export async function assembleFirstCut(adapter: FirstCutAdapter, plan: FirstCutPlan, label = "AI first cut"): Promise<{token: number}> {
+export async function assembleFirstCut(adapter: Pick<ShwayAdapter, "inspect" | "assemble">, plan: FirstCutPlan, label = "AI first cut"): Promise<ProposalPreview> {
   if (!plan || !Array.isArray(plan.ranges) || plan.ranges.length === 0) fail("the plan has no takes to assemble");
-  const ranges = plan.ranges.map(({item, sourceIn, sourceOut}) => ({item, sourceIn, sourceOut}));
-  const {project} = await adapter.inspect();
-  if (project.activeSequence === null) fail("open a sequence before assembling the first cut");
+  const {project, sequence} = await adapter.inspect();
+  if (project.activeSequence === null || !sequence) fail("open a sequence before assembling the first cut");
+  const rate = sequence.settings?.frame_rate;
+  if (!rate) fail("the active sequence did not report a frame rate");
+  // ponytail: a last word ending at the very source end can widen past it and be refused; clamp with the source duration if real footage hits it.
+  const ranges = plan.ranges.map(range => alignRange(range, rate));
   return adapter.assemble({expectedRevision: project.revision, sequence: project.activeSequence, label, ranges});
 }
 

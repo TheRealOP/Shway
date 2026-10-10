@@ -15,7 +15,7 @@ await mkdir(out, {recursive: true});
 for (const name of ["takes", "adapter", "firstcut"]) {
   const source = await readFile(new URL(`./${name}.ts`, import.meta.url), "utf8");
   // Browser ESM resolves the sibling emitted module, not its TypeScript source.
-  const javascript = stripTypeScriptTypes(source, {mode: "strip"}).replaceAll('from "./takes.ts"', 'from "./takes.js"');
+  const javascript = stripTypeScriptTypes(source, {mode: "strip"}).replace(/from "\.\/(takes|adapter)\.ts"/g, 'from "./$1.js"');
   const destination = resolve(out, `${name}.js`);
   await writeFile(destination, javascript);
   console.log(destination);

@@ -136,15 +136,25 @@ test("hostile briefs and takes are rejected before the model is called", async (
 
 test("assembleFirstCut stages the plan's ranges on the active sequence as one preview", async () => {
   const plan = await planFirstCut({brief: BRIEF, script: SCRIPT, takes: TAKES, generate: model(good).generate});
-  const calls: unknown[] = [];
+  const calls: {ranges: {sourceIn: number; sourceOut: number}[]}[] = [];
+  const sequence = {id: 40, duration: 0, video: [], audio: [], settings: {frame_rate: {num: 24, den: 1}}};
   const adapter = {
-    inspect: async () => ({project: {revision: 7, activeSequence: 40}}),
-    assemble: async (input: unknown) => {calls.push(input); return {token: 3};},
-  };
+    inspect: async () => ({project: {revision: 7, activeSequence: 40}, sequence}),
+    assemble: async (input: never) => {calls.push(input); return {token: 3} as never;},
+  } as unknown as Parameters<typeof assembleFirstCut>[0];
   assert.deepEqual(await assembleFirstCut(adapter, plan), {token: 3});
-  assert.deepEqual(calls, [{expectedRevision: 7, sequence: 40, label: "AI first cut", ranges: plan.ranges}]);
+  // 24 fps frame = 10_584_000_000 ticks. Take 1 spans 8.0 s (frame 192) .. 9.9 s (frame 237.6, widened to 238).
+  const frame = 10_584_000_000;
+  assert.deepEqual(calls[0], {expectedRevision: 7, sequence: 40, label: "AI first cut", ranges: [
+    {item: 41, sourceIn: 192 * frame, sourceOut: 238 * frame},
+    {item: 41, sourceIn: Math.floor(TAKES[4].sourceIn / frame) * frame, sourceOut: Math.ceil(TAKES[4].sourceOut / frame) * frame},
+  ]});
+  assert.equal(TAKES[1].sourceIn, 192 * frame);
+  assert.ok(calls[0].ranges.every((r, i) => r.sourceIn <= plan.ranges[i].sourceIn && r.sourceOut >= plan.ranges[i].sourceOut && r.sourceIn % frame === 0 && r.sourceOut % frame === 0));
   await assert.rejects(assembleFirstCut(adapter, {choices: [], ranges: [], skipped: [0, 1]}), FirstCutError);
-  await assert.rejects(assembleFirstCut({...adapter, inspect: async () => ({project: {revision: 7, activeSequence: null}})}, plan), FirstCutError);
+  const without = (s: unknown) => ({...adapter, inspect: async () => ({project: {revision: 7, activeSequence: s ? 40 : null}, sequence: s})}) as never;
+  await assert.rejects(assembleFirstCut(without(null), plan), FirstCutError);
+  await assert.rejects(assembleFirstCut(without({...sequence, settings: {}}), plan), /frame rate/);
   assert.equal(calls.length, 1);
 });
 
