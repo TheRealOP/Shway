@@ -17,7 +17,7 @@ The directory sits outside `apps/` because `apps/*` is a Cargo workspace glob.
 States: `Idle → Armed ⇄ Adjusting → Idle`, plus latched `TrackingLost` / `Cancelled`.
 The FST's `Targeting / Preview / Committed` belong to edit proposals (DEV-92), not scrubbing.
 
-- **Engage:** pinch (thumb–index tip distance / palm length < 0.35, release > 0.5), or hold Space.
+- **Engage:** thumb–index pinch (tip distance / palm length < 0.35, release > 0.5; the thumb must also be 1.5× closer to the index tip than the middle tip, so thumb–middle pinches and fists don't engage), or hold Space.
   Engagement captures the neutral knuckle direction.
 - **Twist:** roll about the wrist→middle-knuckle axis, measured against the captured neutral each frame
   (absolute, not integrated, so no drift). EMA-smoothed, 12° dead zone, quantized to

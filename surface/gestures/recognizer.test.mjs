@@ -19,11 +19,16 @@ let seed = 1;
 const rand = () => ((seed = (seed * 16807) % 2147483647) / 2147483647 - 0.5);
 
 /** One hand pose: twist (deg about the forearm), image position, pinch, jitter. */
+// pinch: true = thumb to index tip; "middle" = thumb to middle tip; "fist" = fingers curled onto the thumb.
 function hand({ twist = 0, x = 0.5, y = 0.5, pinch = false, left = false, score = 0.95, jitter = 0.0015 } = {}) {
   const a = (twist * Math.PI) / 180;
-  const world = BASE.map(([px, py], i) => {
-    let [wx, wy] = i === 4 && pinch ? BASE[8] : [px, py];
-    if (i === 4 && pinch) wx += 0.005;
+  const pose = pinch === "fist"
+    ? BASE.map(([px, py], i) => (i % 4 === 0 && i > 4 ? [px * 0.5 - 0.02, 0.07] : i === 4 ? [-0.025, 0.075] : [px, py]))
+    : BASE;
+  const target = pinch === "middle" ? BASE[12] : BASE[8];
+  const world = pose.map(([px, py], i) => {
+    let [wx, wy] = i === 4 && pinch && pinch !== "fist" ? target : [px, py];
+    if (i === 4 && pinch && pinch !== "fist") wx += 0.005;
     const wz = 0;
     // rotate about +y, then mirror x for a left hand
     let rx = wx * Math.cos(a) + wz * Math.sin(a);
@@ -70,6 +75,14 @@ test("pinch engages; signed twist shuttles; neutral pauses; release stops", () =
   assert.equal(evs.at(-2).rate, 0);
   // Nothing moved during the dead-zone segment.
   assert.ok(!evs.some((e) => e.type === "shuttle" && e.t >= 660 && e.t < 990));
+});
+
+test("only a thumb–index pinch engages, not thumb–middle or a fist", () => {
+  for (const pinch of ["middle", "fist"]) {
+    const evs = replay(frames(0, 600, () => ({ hand: hand({ pinch }) })));
+    assert.deepEqual(evs, [], pinch);
+  }
+  assert.equal(replay(frames(0, 100, () => ({ hand: hand({ pinch: true }) })))[0]?.type, "engage");
 });
 
 test("shuttle rate is bounded at extreme twist", () => {

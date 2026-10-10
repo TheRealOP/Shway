@@ -29,6 +29,7 @@ export const DEFAULTS = {
   minScore: 0.6,
   pinchOn: 0.35, // thumb–index tip distance / palm length: engage below, release above pinchOff
   pinchOff: 0.5,
+  pinchIndexOnly: 1.5, // engage only if the thumb is this many times closer to the index tip than the middle tip (rejects thumb–middle pinches and fists)
   smoothing: 0.5, // EMA weight of each new twist sample, (0, 1]
   deadZoneDeg: 12,
   maxDeg: 60, // twist beyond the dead zone at which the fastest rate is reached
@@ -43,7 +44,7 @@ export const DEFAULTS = {
   mirrored: false, // true when landmarks come from a mirrored (selfie) image
 };
 
-const WRIST = 0, THUMB_TIP = 4, INDEX_MCP = 5, INDEX_TIP = 8, MIDDLE_MCP = 9, PINKY_MCP = 17;
+const WRIST = 0, THUMB_TIP = 4, INDEX_MCP = 5, INDEX_TIP = 8, MIDDLE_MCP = 9, MIDDLE_TIP = 12, PINKY_MCP = 17;
 const DEG = 180 / Math.PI;
 
 /** @param {P3} a @param {P3} b */
@@ -133,7 +134,8 @@ export function createRecognizer(config = {}) {
       const palm = len(sub(h.world[MIDDLE_MCP], h.world[WRIST]));
       const pinch = len(sub(h.world[THUMB_TIP], h.world[INDEX_TIP])) / palm;
       pinchRatio = pinch;
-      pinching = pinching ? pinch < c.pinchOff : pinch < c.pinchOn;
+      const middle = len(sub(h.world[THUMB_TIP], h.world[MIDDLE_TIP])) / palm;
+      pinching = pinching ? pinch < c.pinchOff : pinch < c.pinchOn && middle > pinch * c.pinchIndexOnly;
     } else {
       pinching = false;
       pinchRatio = Infinity;
