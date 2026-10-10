@@ -1,5 +1,7 @@
 # Acceptance and verification
 
+Current local results: [foundation evidence](foundation-evidence.md).
+
 ## Complete creator workflow
 
 - Real source footage imports, plays, edits, undoes, and exports.

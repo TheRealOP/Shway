@@ -51,6 +51,28 @@ boundary instead of streaming hundreds of independent history edits.
 A replacement that is shorter than the retained timeline duration must be previewed and re-planned;
 never silently freeze its final frame.
 
+## Bounded proposal boundary
+
+The DEV-87 slice adds `proposal.preview`, `proposal.inspect`, `proposal.render`, `proposal.commit`,
+and `proposal.cancel` to the normal engine registry. The [browser adapter](../../shway/README.md)
+discovers these commands and exposes typed inspection, selection, playback, frame seek, proposal,
+undo, and accepted-project export/job status.
+
+A proposal names its expected project revision, active sequence, label, explicit source/clip IDs,
+at most 16 allowlisted trim/replacement steps, and at most 32 total explicit target references.
+Labels are limited to 120 UTF-8 bytes. IDs and ticks must fit exact browser integers;
+edit deltas are integer frames. Unsupported targets and short replacement sources are rejected.
+
+Commands run in an unpublished staging session with shared media and cloned project/state, no
+persistence or external jobs. Candidate inspection and bounded frame rendering do not swap the
+live project. Commit rechecks revision, project snapshot identity and interaction context, then
+uses one normal engine edit; cancellation drops the candidate and preserves undo/redo and newer
+work. A visible candidate frame can be presented separately from the accepted timeline. Playback
+and export continue to use the accepted project; full candidate playback is not implemented.
+
+See [verification evidence](foundation-evidence.md) for checks actually completed. Gesture/voice
+integration and real creator footage remain separate acceptance work.
+
 ## Source anchors
 
 [Engine architecture](../architecture.md) · [Browser API](../web.md) ·

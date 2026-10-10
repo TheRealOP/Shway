@@ -3,12 +3,14 @@
 Start here. This is a version-controlled wiki in the repository, not a separate GitHub Wiki.
 Each page links to related concepts; the map below shows how they connect.
 
-**Status:** implementation plan, October 10, 2026. The fork exists; no successful local build,
-gesture implementation, export test, or TRIBE benchmark has been recorded.
-Update this statement when there is evidence, with a commit or reproducible result.
+**Status:** October 10, 2026. The browser build and a synthetic import/play/edit/undo/save/reopen/
+H.264+AAC export workflow are locally verified; see [foundation evidence](foundation-evidence.md).
+Real creator footage, gesture integration, and TRIBE inference remain unverified.
+Linear remains the task-status source; partial evidence does not complete a gate.
 
 ## Handoff and HTML plan
 
+- [Foundation evidence](foundation-evidence.md): local build, synthetic browser workflow, reproduction, and open acceptance checks.
 - [Implementation handoff](../HANDOFF.md): current state, first-session checklist, decisions, and open questions.
 - [HTML implementation plan](../shway-implementation-plan.html): download or open from a checkout in a browser. GitHub displays the source; this file is not a hosted deployment.
 
@@ -35,6 +37,7 @@ flowchart TD
   G --> T
   N --> T
   L --> T
+  T --> V["Verification: local foundation evidence"]
   D["Decisions: assumptions + alternatives"] --> A
   D --> N
   Y["YAGNI: smallest complete behavior"] --> I
@@ -47,6 +50,7 @@ flowchart TD
   click L "https://github.com/TheRealOP/Shway/blob/main/docs/wiki/adaptation.md" "Open Adaptation"
   click T "https://github.com/TheRealOP/Shway/blob/main/docs/wiki/acceptance.md" "Open Acceptance"
   click D "https://github.com/TheRealOP/Shway/blob/main/docs/wiki/decisions.md" "Open Decisions"
+  click V "https://github.com/TheRealOP/Shway/blob/main/docs/wiki/foundation-evidence.md" "Open Foundation evidence"
   click Y "https://github.com/TheRealOP/Shway/blob/main/docs/wiki/yagni.md" "Open YAGNI"
 ```
 
@@ -62,6 +66,7 @@ If your Markdown viewer disables clickable Mermaid nodes, use these ordinary lin
 | [Adaptation](adaptation.md) | What learns, what stays stable, and how are patches evaluated? |
 | [Acceptance](acceptance.md) | What evidence proves the experience works? |
 | [Decisions](decisions.md) | Which choices are settled, provisional, or still unknown? |
+| [Foundation evidence](foundation-evidence.md) | What passed locally and what remains unverified? |
 | [YAGNI](yagni.md) | How do agents avoid building unnecessary systems? |
 
 ## Project references
