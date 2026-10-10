@@ -298,3 +298,87 @@ playlist, validates it (numbers exist, no duplicates, 500–1600 spoken words; o
 error), widens ranges to whole frames with `alignRange`, and places them with `proposal.preview` →
 `proposal.commit`. The engine caps a proposal at 32 ranges, so a longer cut commits as several
 labelled proposals. Needs a CLI built from this tree (`proposal` `timeline.place` steps).
+
+## Chat assistant (`assistant.mjs`)
+
+A local service that lets the creator chat with the AI that edits their video in the desktop editor.
+It needs Node 23 or later, because it imports `adapter.ts` and `replace.ts`. It has no package dependencies.
+
+```sh
+filmcraft --control 9876 project.fcproj                 # the desktop editor
+node shway/gemini-server.mjs --port 8790                # holds the Gemini / Jev keys
+node shway/assistant.mjs --port 8793 --editor 127.0.0.1:9876 --proxy http://127.0.0.1:8790 [--takes takes.json]
+node --test shway/assistant.test.mjs                    # fake editor (TCP) + fake proxy
+```
+
+**Contract.** The service listens on loopback only and refuses non-local `Origin` headers. JSON bodies are at most 64 KB.
+
+| Route | Body | Returns |
+|---|---|---|
+| `GET /chat/state` | – | `{messages: [{role: "user"\|"assistant", text}], pending: null\|{token, label}, busy}` |
+| `POST /chat` | `{message}` (1–2000 chars) | `{reply, pending, busy}` |
+| `POST /chat/accept` | `{}` or empty | commits the pending preview (one undo step); same shape |
+| `POST /chat/reject` | `{}` or empty | cancels it; same shape |
+
+- **Errors:** a non-2xx status with `{error}`. While a request is running, POSTs return 409.
+  Accept or reject with nothing pending also returns 409. An unreachable editor or proxy returns 502.
+- **Memory:** the conversation is kept in memory only and capped at 200 messages.
+
+**How a message becomes an edit:**
+
+1. The service cancels any older pending preview, because the engine holds one at a time.
+2. It inspects the project: the active sequence's clips with their file names, start and duration in
+   seconds, selection, playhead and fps. Where the project has transcripts it adds the words from
+   `transcript.inspect`. The model gets this as JSON data, never as instructions. Linked audio is
+   folded into its video clip.
+3. Gemini (`POST {proxy}/generate` with a response schema) picks one action from the allowlist. Each
+   action has its own nested object, and every field in it is required: `answer`, `remove{clips}`,
+   `trim{clip, edge, direction, amount, unit}`, `move{clip, target, position}` and
+   `replace_take{correction}`.
+4. Validation rejects any other field, unknown clip ids, amounts that are not positive, trims past
+   the clip length or the media handles, and moves onto the same clip. An invalid answer gets one
+   retry that quotes the error. If that also fails, the creator gets a polite "couldn't" reply.
+5. Code maps the checked fields to engine params. The model never names commands, files or raw params.
+6. Edits go only through `proposal.preview` with `expectedRevision`. A trim is a ripple
+   `timeline.trim` of `round(seconds × fps)` frames. `replace_take` calls `proposeReplacement` on
+   the selected clip with the `--takes` index. It uses Jev when the proxy reports `jev: true`, and
+   Gemini otherwise. Nothing commits until `/chat/accept`.
+7. A stale revision, at preview or at accept, cancels the preview and asks the creator to retry.
+
+**Not supported yet:**
+
+- **`remove` and `move`:** `proposal.preview` only has `timeline.trim`, `clip.replaceFromBin` and
+  `timeline.place` steps (`crates/engine/src/proposals.rs`). A trim cannot take a clip to zero
+  length, and `place` only appends. The assistant validates these requests, names the clips it
+  understood, and replies that it can't do them safely yet. Nothing changes, and it does not bypass
+  the preview with direct edits. Supporting them needs a ripple-delete step and a move step in the
+  proposal engine.
+- **Restarts:** a pending preview is not cancelled when the service restarts. The engine then
+  refuses new previews until that token is cancelled or the app restarts.
+
+**Verified 2026-10-10 (live).** Setup:
+
+- A release `filmcraft --control 9878` ran on a copy of `longform-chrono.fcproj`: 53 linked clips at 59.94 fps.
+- The 20 word transcripts were imported first through `transcript.set`, giving 20 setup undo steps.
+- The run used a real Gemini proxy (`gemini-3.8-flash`) and `curl`-style requests.
+
+Results:
+
+| Message | Latency | Result |
+|---|---|---|
+| A question about the video | 4.5 s | Summarized the vlog and named the Chili's clips (104, 107) |
+| "remove the Chili's part" | 5.9 s | Unsupported reply; nothing changed |
+| "trim the end of the first clip by 1 second" | 3.9 s | Previewed a 60-frame ripple trim; history unchanged |
+| Reject | 0.00 s | Discarded; history unchanged |
+| The same trim again | 3.3 s | Previewed |
+| Accept | 0.08 s | Undo count 20 → 21 (`Trim end of C5500.MP4 (shorten 60 frames)`); sequence 37130 → 37070 frames |
+| Undo, then redo | – | Undo restored exactly 37130 frames; redo reapplied the trim |
+| "move the Chili's part to the very start" | 29.8 s | Gemini answered and asked which single clip to move; nothing changed |
+| "make the start of the second clip 10 frames tighter" | 3.2 s | Previewed and accepted as one step, after a `playhead.set` in between |
+| "use the take where I laugh" | 17.2 s | With no selection, asked the creator to select a clip |
+| Accept after the creator undid in the app | – | Stale: "didn't apply it"; nothing committed |
+| A request with an `https://evil.example` origin | – | 403 |
+
+Every Gemini answer in the run passed validation on the first try. An earlier flat schema failed:
+the model dropped or invented trim fields, which is why each action now has a nested object.
+The `replace_take` path with a real take index was not exercised live; its unit tests are in `replace.test.ts`.

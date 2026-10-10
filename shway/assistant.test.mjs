@@ -22,7 +22,7 @@ function fakeEditor() {
     switch (command) {
       case "project.inspect": return { revision: st.revision, activeSequence: 27, root: { children: [{ item: 1, type: "Movie", duration: 1000 * F }, { item: 2, type: "Movie", duration: 150 * F }] } };
       case "sequence.inspect": return seq();
-      case "transcript.inspect": return { words: [{ text: "hello", clip: 10 }, { text: "we're", clip: 12 }, { text: "at", clip: 12 }, { text: "Chili's", clip: 12 }] };
+      case "transcript.inspect": return { words: [{ text: "hello", clip: 10 }, { text: "we're", clip: 13 }, { text: "at", clip: 13 }, { text: "Chili's", clip: 13 }] }; // words land on the audio half
       case "proposal.preview": {
         st.onPreview?.();
         if (st.proposal) throw new Error("edit proposal: cancel or commit the current preview before proposing another");
@@ -75,11 +75,13 @@ function fakeProxy() {
     const a = answers.shift();
     if (typeof a === "function") a();
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ json: typeof a === "function" ? answers.shift() : a }));
+    res.end(JSON.stringify({ json: A(typeof a === "function" ? answers.shift() : a) }));
   });
   return { answers, prompts, server, hold() { let open; gate = new Promise((r) => (open = r)); return () => { gate = null; open(); }; } };
 }
 
+// Model answers in the nested schema shape: ({action, reply, ...fields}) -> {action, reply, [action]: fields}.
+const A = ({ action, reply, ...f }) => (action === "answer" ? { action, reply } : { action, reply, [action]: f });
 const listen = (s) => new Promise((r) => s.listen(0, "127.0.0.1", () => r(s.address().port)));
 
 async function setup(opts = {}) {
@@ -234,10 +236,14 @@ test("validateAction: extra fields, missing fields, ids, handles", () => {
   const c = (id, item, sourceIn, dur) => ({ clip: id, item, name: `c${id}`, start: 0, duration: dur * F, sourceIn: sourceIn * F, sourceOut: (sourceIn + dur) * F });
   const snap = { clips: new Map([[10, c(10, 1, 30, 300)], [12, c(12, 2, 0, 150)]]), frame: F, rate: { num: 30, den: 1 },
     project: { root: { children: [{ item: 1, duration: 1000 * F }, { item: 2, duration: 150 * F }] } } };
-  const bad = (a, re) => assert.throws(() => validateAction(a, snap), re);
+  const bad = (a, re, raw = false) => assert.throws(() => validateAction(raw ? a : A(a), snap), re);
   const trim = (o) => ({ action: "trim", reply: "r", clip: 10, edge: "out", direction: "shorten", amount: 1, unit: "frames", ...o });
-  bad({ action: "answer", reply: "r", clips: [10] }, /field clips is not allowed/);
-  bad({ action: "trim", reply: "r", clip: 10 }, /needs edge/);
+  bad({ action: "answer", reply: "r", remove: { clips: [10] } }, /field remove is not allowed/, true);
+  bad({ action: "trim", reply: "r", clip: 10, trim: {} }, /field clip is not allowed/, true);
+  bad({ action: "trim", reply: "r", trim: { clip: 10, edge: "out", direction: "shorten", amount: 1, unit: "frames" }, move: { clip: 10 } }, /field move is not allowed/, true);
+  bad({ action: "trim", reply: "r" }, /needs a trim object/, true);
+  bad({ action: "trim", reply: "r", clip: 10 }, /needs trim.edge/);
+  bad(trim({ frames: 3 }), /field trim.frames is not allowed/);
   bad({ action: "answer" }, /reply/);
   bad({ action: "shell", reply: "r" }, /action must be/);
   bad({ action: "remove", reply: "r", clips: [] }, /1–32/);
@@ -250,7 +256,7 @@ test("validateAction: extra fields, missing fields, ids, handles", () => {
   bad(trim({ amount: 300 }), /only 300 frames long/);
   bad(trim({ edge: "in", direction: "extend", amount: 31 }), /only 30 frames of media before/);
   bad(trim({ clip: 12, direction: "extend" }), /only 0 frames of media after/);
-  assert.equal(validateAction(trim({ edge: "in", direction: "extend", amount: 30 }), snap).deltaFrames, -30);
-  assert.equal(validateAction(trim({ direction: "extend", amount: 2, unit: "seconds" }), snap).deltaFrames, 60);
-  assert.deepEqual(validateAction({ action: "answer", reply: " hi ", clips: null }, snap), { action: "answer", reply: "hi" });
+  assert.equal(validateAction(A(trim({ edge: "in", direction: "extend", amount: 30 })), snap).deltaFrames, -30);
+  assert.equal(validateAction(A(trim({ direction: "extend", amount: 2, unit: "seconds" })), snap).deltaFrames, 60);
+  assert.deepEqual(validateAction({ action: "answer", reply: " hi ", trim: null }, snap), { action: "answer", reply: "hi" });
 });
