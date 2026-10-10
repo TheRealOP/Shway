@@ -225,15 +225,23 @@ function talk(e) {
 function snapshot() { return { ...context, gesture: recognizer.view().state }; }
 async function utterance(u) {
   const secs = ((u.endT - u.startT) / 1000).toFixed(1);
-  $("said").textContent = u.transcript?.text ? `“${u.transcript.text}”` : `${u.source}, ${secs} s, no transcript yet`;
-  const hook = await loadHook("./replace.js", ["proposeReplacement"]);
-  if (hook.error) return void ($("replaceNote").textContent = `Replacement: ${hook.error}`);
-  $("replaceNote").textContent = "Proposing a replacement…";
+  const said = () => { $("said").textContent = u.transcript?.text ? `“${u.transcript.text}”` : `${u.source}, ${secs} s, no transcript yet`; };
+  said();
+  const note = (t) => { $("replaceNote").textContent = t; };
+  // shway/replace.ts (DEV-92): {status: "preview", token, label, explanation, …} or {status, message}.
+  const hook = await loadHook("./replace.js", ["proposeReplacement", "geminiGenerate", "transcribe"]);
+  if (hook.error) return note(`Replacement: ${hook.error}`);
+  const { proposeReplacement, geminiGenerate, transcribe } = hook.module;
   try {
-    const r = await hook.module.proposeReplacement(u, { adapter: need(), gemini: GEMINI });
-    $("replaceNote").textContent = "";
+    const idx = await indexFromForm();
+    if (idx.error) return note(`Replacement needs the takes (Story brief): ${idx.error}`);
+    if (!u.transcript) { note("Transcribing…"); u.transcript = await transcribe(u.audio, GEMINI); said(); }
+    note("Proposing a replacement…");
+    const r = await proposeReplacement({ utterance: u, takes: idx.takes, generate: geminiGenerate(GEMINI), adapter: need() });
+    if (r?.status !== "preview") return note(r?.message ?? `Replacement: ${r?.status ?? "no result"}`);
+    note(r.explanation ?? "");
     await proposals.show(r);
-  } catch (err) { $("replaceNote").textContent = `Replacement failed: ${err?.message ?? err}`; }
+  } catch (err) { note(`Replacement failed: ${err?.message ?? err}. Re-plan and try again.`); }
 }
 let typedN = 0;
 $("typed").onsubmit = (ev) => {
@@ -249,30 +257,38 @@ ptt.addEventListener("pointerdown", (e) => { ptt.setPointerCapture(e.pointerId);
 for (const ev of ["pointerup", "pointercancel"]) ptt.addEventListener(ev, () => { if (voice.view().recording) talk(voice.stop(performance.now())); });
 (function tick() { talk(voice.tick(performance.now())); requestAnimationFrame(tick); })();
 
+// ---- Take index from the brief form's script + transcripts (shared by first cut and replacement).
+// Throws on malformed transcript JSON (takes.js parseTranscript explains why).
+async function indexFromForm() {
+  const form = $("brief");
+  const r = readBrief(Object.fromEntries(new FormData(form)));
+  if (r.error) return r;
+  const files = [...form.transcripts.files];
+  if (!files.length) return { error: "Add at least one transcript JSON file." };
+  const { parseTranscript, indexTakes } = await import("./takes.js");
+  const transcripts = [];
+  for (const f of files) {
+    if (f.size > 8 << 20) return { error: `${f.name} is larger than 8 MB.` };
+    const json = JSON.parse(await f.text());
+    for (const one of Array.isArray(json) ? json : [json]) transcripts.push(parseTranscript(one));
+  }
+  return { ...r, takes: indexTakes(transcripts, r.script) };
+}
+
 // ---- Brief → first cut hook (shway/firstcut.ts: planFirstCut, assembleFirstCut).
 $("brief").onsubmit = async (ev) => {
   ev.preventDefault();
-  const form = ev.target, err = $("briefErr");
+  const err = $("briefErr");
   err.textContent = ""; $("plan").textContent = "";
-  const r = readBrief(Object.fromEntries(new FormData(form)));
-  if (r.error) return void (err.textContent = r.error);
-  const files = [...form.transcripts.files];
-  if (!files.length) return void (err.textContent = "Add at least one transcript JSON file.");
-  const hook = await loadHook("./firstcut.js", ["planFirstCut", "assembleFirstCut", "proxyGenerate"]);
-  if (hook.error) return void (err.textContent = `First cut: ${hook.error}`);
   $("cut").disabled = true;
   try {
-    const { parseTranscript, indexTakes } = await import("./takes.js");
-    const transcripts = [];
-    for (const f of files) {
-      if (f.size > 8 << 20) throw new Error(`${f.name} is larger than 8 MB`);
-      const json = JSON.parse(await f.text());
-      for (const one of Array.isArray(json) ? json : [json]) transcripts.push(parseTranscript(one));
-    }
-    const takes = indexTakes(transcripts, r.script);
-    $("plan").textContent = `${takes.length} takes indexed. Asking Gemini…`;
+    const r = await indexFromForm();
+    if (r.error) return void (err.textContent = r.error);
+    const hook = await loadHook("./firstcut.js", ["planFirstCut", "assembleFirstCut", "proxyGenerate"]);
+    if (hook.error) return void (err.textContent = `First cut: ${hook.error}`);
+    $("plan").textContent = `${r.takes.length} takes indexed. Asking Gemini…`;
     const { planFirstCut, assembleFirstCut, proxyGenerate } = hook.module;
-    const plan = await planFirstCut({ brief: r.brief, script: r.script, takes, generate: proxyGenerate(`${GEMINI}/generate`) });
+    const plan = await planFirstCut({ brief: r.brief, script: r.script, takes: r.takes, generate: proxyGenerate(`${GEMINI}/generate`) });
     $("plan").textContent = plan.choices.map((c) => `${c.statementIndex + 1}. ${c.reason}`).join("\n") +
       (plan.skipped.length ? `\nNo take for statement ${plan.skipped.map((i) => i + 1).join(", ")}` : "");
     const result = await assembleFirstCut(need(), plan);
@@ -313,7 +329,7 @@ $("expand").onclick = () => document.body.classList.remove("collapsed");
 function render() {
   const v = recognizer.view(), rec = voice.view(), p = proposals.pending;
   $("state").textContent = rec.recording ? "Talking" : v.state; $("state").dataset.s = v.state;
-  const sel = context.target ? `clip ${context.target}` : context.selection.length ? `${context.selection.length} clips (select one)` : "no clip selected";
+  const sel = context.target ? `clip ${context.target}` : context.selection.length ? `${context.selection.length} clips selected` : "no clip selected";
   let mode, target, effect;
   if (rec.recording) [mode, target, effect] = ["Talk", sel, "let go of the pinch / V to finish · Esc cancels"];
   else if (v.state === "Armed" || v.state === "Adjusting") [mode, target, effect] = [v.fine ? "Fine step" : `Shuttle ${v.rate}×`, "playhead", v.fine ? "twist steps frames" : "twist sets speed · release keeps position · Esc returns"];

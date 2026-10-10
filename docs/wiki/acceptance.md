@@ -7,7 +7,10 @@ editor next to the Shway panel. Verified in Claude's browser pane with synthetic
 engine build and the demo project (no camera or mic): the adapter connects; swipe, step, chop and
 panel Undo drive the editor; a real trim proposal previews without changing the timeline; accept by
 double tap and by `A`, reject by `X`, and Undo each act once; brief validation and the missing
-first-cut/replacement hooks report clearly; camera and microphone denial is reported; no horizontal
+first-cut/replacement hooks report clearly. With `replace.js` from the DEV-92 branch (bcab4e0) and a live
+Gemini call, a typed utterance reached `proposeReplacement`. It showed "select the clip" without a
+selection and "no matching take" for unrelated takes. For matching synthetic takes, it showed the engine's
+refusal (A2 sync lock in the demo project), so no replacement preview was staged; camera and microphone denial is reported; no horizontal
 scroll at 400 px. Not verified: live camera or microphone, the still-pinch talk gesture with a real hand,
 visible editor rendering (the pane was hidden, so the editor did not paint), and the first-cut and
 replacement flows (their modules are not built yet).

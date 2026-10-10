@@ -53,12 +53,16 @@ The panel loads these modules from the dist root. When a module is missing, it s
   `planFirstCut({brief, script, takes, generate})`, then `assembleFirstCut(adapter, plan)`. The plan's
   reasons are listed. A result with a `token` goes to the preview bar; any other result counts as
   already applied, and Undo reverts it.
-- **Replacement:** `replace.js` (`shway/replace.ts`) must export `proposeReplacement`. It is called
-  as `proposeReplacement(utterance, {adapter, gemini})` for every finished utterance, spoken or typed
-  in the "type what you'd say" field. The result goes to the preview bar.
+- **Replacement:** `replace.js` (`shway/replace.ts`) must export `proposeReplacement`, `geminiGenerate`
+  and `transcribe`. It runs for every finished utterance, spoken or typed in the "type what you'd say"
+  field. A spoken utterance is first transcribed (`transcribe(audio, proxy)`, which needs the proxy's
+  `POST /transcribe`). Then `proposeReplacement({utterance, takes, generate, adapter})` runs. The takes
+  come from the brief form's script and transcripts. `status: "preview"` goes to the preview bar,
+  with its explanation shown under the voice section. `need-selection`, `no-take` and `rejected` show
+  their message. Thrown errors (stale revision, engine refusals) are shown so you can re-plan.
   The utterance context is `{revision, sequence, selection, target, playhead, gesture}`. The panel
-  polls `project.inspect` and `ui.inspect` every 500 ms for it. `target` is set only when exactly one
-  clip is selected. Spoken utterances have `transcript: null` until a speech-to-text provider fills it.
+  polls `project.inspect` and `ui.inspect` every 500 ms to keep it current. `target` is set only when exactly one
+  clip is selected.
 
 `window.shwayDemo` exposes `gesture(event)`, `frame(hand, keys)`, `proposals`, `voice`, `adapter`,
 `context` and `recognizer` for automation and tests.
