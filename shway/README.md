@@ -84,6 +84,33 @@ node apps/filmcraft-web/tests/foundation.mjs --url http://127.0.0.1:8765/ --medi
 See [foundation evidence](../docs/wiki/foundation-evidence.md) and the
 [architecture contract](../docs/wiki/architecture.md). Never commit fixtures or generated output.
 
+## Story brief and AI first cut (DEV-89 / DEV-90)
+
+`firstcut.ts` turns an editable brief plus the take index into a first cut. The model only
+**chooses**: each candidate take is offered by an opaque number with its exact words and score, never
+with times. Every `sourceIn`/`sourceOut` in the result is copied from the take index.
+
+```js
+const {parseTranscript, indexTakes} = await import('/takes.js');
+const {parseBrief, planFirstCut, proxyGenerate} = await import('/firstcut.js');
+const brief = parseBrief({message: "…", audience: "…", feeling: "…", durationSeconds: 30,
+  requiredMoments: ["…"], exclusions: ["filler words"]});   // throws FirstCutError on bad input
+const takes = indexTakes([parseTranscript(transcriptJson)], script);
+const plan = await planFirstCut({brief, script, takes, generate: proxyGenerate()});
+// plan.choices: [{statementIndex, take, reason}]  plan.ranges: [{item, sourceIn, sourceOut}]
+// plan.skipped: statements with no indexed take (left out of the cut)
+```
+
+- **Brief:** `message`, `audience`, `feeling` (1–500 characters), optional `durationSeconds`
+  (0–3600], `requiredMoments`/`exclusions` (≤20 strings). Unknown fields are rejected. The brief
+  reaches the model only as JSON data, under a system rule that data is not instructions.
+- **Validation:** the response must have exactly one choice per statement that has candidates, each
+  naming a take that exists and belongs to that statement, with a 1–300 character reason and no
+  extra fields (so no model-supplied times). Invalid output gets one retry quoting the error, then
+  `planFirstCut` throws `FirstCutError`. Transport errors from `generate` propagate without retry.
+- **Bounds:** ≤200 statements, ≤400 takes; take times are copied before the model call.
+- `generate` is injected (`proxyGenerate(url)` posts to the local Gemini proxy and returns its `json`).
+
 ## Gemini proxy (creative reasoning)
 
 `shway/gemini-server.mjs` is a local proxy, so the API key never reaches a web page. Node ≥ 22, no
