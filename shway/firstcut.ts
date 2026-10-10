@@ -152,6 +152,23 @@ export async function planFirstCut({brief, script, takes, generate}: {brief: Sto
   return fail(`model returned an invalid first cut twice: ${error}`);
 }
 
+/** The adapter surface the first cut needs (ShwayAdapter.inspect + DEV-90's ShwayAdapter.assemble). */
+export interface FirstCutAdapter {
+  inspect(): Promise<{project: {revision: number; activeSequence: number | null}}>;
+  assemble(input: {expectedRevision: number; sequence: number; label: string; ranges: FirstCutRange[]}): Promise<{token: number}>;
+}
+/**
+ * Stage the planned ranges, in script order, on the active sequence as one proposal preview.
+ * Returns the adapter's preview: `adapter.commit(preview.token)` (one undo step) or `cancel` it.
+ */
+export async function assembleFirstCut(adapter: FirstCutAdapter, plan: FirstCutPlan, label = "AI first cut"): Promise<{token: number}> {
+  if (!plan || !Array.isArray(plan.ranges) || plan.ranges.length === 0) fail("the plan has no takes to assemble");
+  const ranges = plan.ranges.map(({item, sourceIn, sourceOut}) => ({item, sourceIn, sourceOut}));
+  const {project} = await adapter.inspect();
+  if (project.activeSequence === null) fail("open a sequence before assembling the first cut");
+  return adapter.assemble({expectedRevision: project.revision, sequence: project.activeSequence, label, ranges});
+}
+
 /** `generate` backed by the local Gemini proxy (shway/gemini-server.mjs). */
 export function proxyGenerate(url = "http://127.0.0.1:8790/generate"): Generate {
   return async request => {

@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {indexTakes, parseTranscript} from "./takes.ts";
-import {planFirstCut, parseBrief, FirstCutError, FIRST_CUT_SCHEMA} from "./firstcut.ts";
+import {planFirstCut, parseBrief, assembleFirstCut, FirstCutError, FIRST_CUT_SCHEMA} from "./firstcut.ts";
 import type {GenerateRequest} from "./firstcut.ts";
 
 // Same synthetic three-take recording as takes.test.ts.
@@ -132,6 +132,20 @@ test("hostile briefs and takes are rejected before the model is called", async (
   await assert.rejects(planFirstCut({brief: {...BRIEF, message: ""}, script: SCRIPT, takes: TAKES, generate}), FirstCutError);
   await assert.rejects(planFirstCut({brief: BRIEF, script: [], takes: TAKES, generate}), FirstCutError);
   assert.equal(requests.length, 0);
+});
+
+test("assembleFirstCut stages the plan's ranges on the active sequence as one preview", async () => {
+  const plan = await planFirstCut({brief: BRIEF, script: SCRIPT, takes: TAKES, generate: model(good).generate});
+  const calls: unknown[] = [];
+  const adapter = {
+    inspect: async () => ({project: {revision: 7, activeSequence: 40}}),
+    assemble: async (input: unknown) => {calls.push(input); return {token: 3};},
+  };
+  assert.deepEqual(await assembleFirstCut(adapter, plan), {token: 3});
+  assert.deepEqual(calls, [{expectedRevision: 7, sequence: 40, label: "AI first cut", ranges: plan.ranges}]);
+  await assert.rejects(assembleFirstCut(adapter, {choices: [], ranges: [], skipped: [0, 1]}), FirstCutError);
+  await assert.rejects(assembleFirstCut({...adapter, inspect: async () => ({project: {revision: 7, activeSequence: null}})}, plan), FirstCutError);
+  assert.equal(calls.length, 1);
 });
 
 test("brief text reaches the model only as JSON data", async () => {
