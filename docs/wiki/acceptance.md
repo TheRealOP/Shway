@@ -71,3 +71,22 @@ Remove protected upstream branding from modified distributions.
 - **Correct refusal:** asking for a take that doesn't exist returned `rejected` with Gemini's reason
   and staged nothing.
 - **Not verified:** the creator's real footage, live camera and microphone, and export of the result.
+
+**Creator chain with export, verified 2026-10-10 (main @ 90888ac + DEV-104 refactor).**
+- **Media:** 17.4 s H.264/AAC fixture; speech is macOS `say` (one synthetic voice), three takes × two
+  lines, with "uh"/"um" and "our workshop" variants. Picture is `testsrc2`. Not creator footage.
+- **Transcript:** built-in Whisper (`whisper-base`, CPU) produced all 33 words with timings in 3.3 s.
+  Nothing was hand-written.
+- **Run:** `foundation.mjs --creator` in headless Chrome against a fresh `cargo xtask web` release
+  build, with live `gemini-3.8-flash` through the proxy. Two runs; all 15 foundation gates and
+  12 chain gates passed in both runs.
+- **Chain:** take index (3 per line) → Gemini first cut chose both clean takes (plan 4.4 s / 4.0 s) →
+  preview only, then one "AI first cut" undo step → the line-1 clip was selected and given the typed
+  correction "I prefer the take where I say 'our workshop'" → Gemini chose that take (4.0 s / 2.3 s).
+  The authoritative timeline did not change while the preview was pending, a candidate frame
+  rendered, and commit gave one "Replace take" undo step.
+- **Save/reopen/export:** saved, undid the replacement, then reopened the save; the timeline matched
+  the accepted cut with no missing media. The H.264/AAC export (74 frames, 3.09 s) decoded cleanly.
+  Whisper transcribed the downloaded export as "Welcome to our workshop. Today we build a gesture editor."
+- **Not verified:** real creator footage and voices, live microphone and camera on the demo page,
+  sync-locked tracks, OPFS recovery across reload.

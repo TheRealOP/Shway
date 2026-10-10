@@ -2,9 +2,12 @@
 // Serve a generated H.264/AAC MP4 next to index.html; do not commit fixtures.
 // node apps/filmcraft-web/tests/foundation.mjs --url http://127.0.0.1:8765/ --media web-test.mp4 --out /tmp/fc-foundation
 // Verifies same-page save/reopen; OPFS recovery across reload is a separate gate.
+// --creator --transcript <word-timed JSON> [--proxy http://127.0.0.1:8790]: replace the synthetic trim
+// with the AI first cut + replacement chain (creator.mjs), then save/reopen/export that result.
 import assert from "node:assert/strict";
 import {checkProposals} from "./proposals.mjs";
 import {checkTranscripts} from "./transcripts.mjs";
+import {checkCreator} from "./creator.mjs";
 import {spawn, execFile} from "node:child_process";
 import {mkdirSync, writeFileSync, readFileSync, statSync, mkdtempSync, rmSync} from "node:fs";
 import {join} from "node:path";
@@ -200,27 +203,35 @@ try {
     gate("proposalIntegration", report.steps.proposals.ok, report.steps.proposals);
   }
 
-  const trimFrames = 15;
-  gate("fixtureLongEnough", video[0].durationFrames > trimFrames + 1, video[0]);
-  const historyBefore = await execute("history.list");
-  report.steps.trim = await execute("timeline.trim", {clip: video[0].clip, edge: "out", mode: "regular", deltaFrames: -trimFrames});
-  const trimmed = await execute("sequence.inspect");
-  const changed = clips(trimmed);
-  const delta = report.steps.trim.delta;
-  const linked = clips(baseline).filter(clip => clip.link === video[0].link);
-  gate("linkedTrim", delta < 0 && trimmed.video[0].items[0].durationFrames === video[0].durationFrames - trimFrames && linked.length >= 2 && linked.every(original => {
-    const after = changed.find(clip => clip.clip === original.clip);
-    return after && after.duration === original.duration + delta && after.sourceOut === original.sourceOut + delta && after.start === original.start && after.sourceIn === original.sourceIn;
-  }), {delta, baseline, trimmed});
-  const historyAfter = await execute("history.list");
-  gate("oneUndoStep", historyAfter.undo.length === historyBefore.undo.length + 1, {historyBefore, historyAfter});
-  const undone = await execute("edit.undo");
-  const restored = await execute("sequence.inspect");
-  gate("undoRestoresAV", undone.undone === "Trim" && JSON.stringify(timeline(restored)) === JSON.stringify(timeline(baseline)), {undone, restored});
-  const redone = await execute("edit.redo");
-  const accepted = await execute("sequence.inspect");
-  gate("redoRestoresEdit", redone.redone === "Trim" && JSON.stringify(timeline(accepted)) === JSON.stringify(timeline(trimmed)), {redone, accepted});
-  report.steps.edit = {trimmed, restored, accepted, historyBefore, historyAfter, screenshot: await screenshot("02-edited")};
+  let accepted;
+  if (process.argv.includes("--creator")) {
+    report.steps.creator = await checkCreator({evaluate, item: report.steps.import.items[0], transcriptPath: arg("transcript"), proxy: arg("proxy", "http://127.0.0.1:8790")});
+    gate("creatorChain", report.steps.creator.ok, report.steps.creator);
+    accepted = await execute("sequence.inspect");
+    report.steps.creator.screenshot = await screenshot("02-creator-cut");
+  } else {
+    const trimFrames = 15;
+    gate("fixtureLongEnough", video[0].durationFrames > trimFrames + 1, video[0]);
+    const historyBefore = await execute("history.list");
+    report.steps.trim = await execute("timeline.trim", {clip: video[0].clip, edge: "out", mode: "regular", deltaFrames: -trimFrames});
+    const trimmed = await execute("sequence.inspect");
+    const changed = clips(trimmed);
+    const delta = report.steps.trim.delta;
+    const linked = clips(baseline).filter(clip => clip.link === video[0].link);
+    gate("linkedTrim", delta < 0 && trimmed.video[0].items[0].durationFrames === video[0].durationFrames - trimFrames && linked.length >= 2 && linked.every(original => {
+      const after = changed.find(clip => clip.clip === original.clip);
+      return after && after.duration === original.duration + delta && after.sourceOut === original.sourceOut + delta && after.start === original.start && after.sourceIn === original.sourceIn;
+    }), {delta, baseline, trimmed});
+    const historyAfter = await execute("history.list");
+    gate("oneUndoStep", historyAfter.undo.length === historyBefore.undo.length + 1, {historyBefore, historyAfter});
+    const undone = await execute("edit.undo");
+    const restored = await execute("sequence.inspect");
+    gate("undoRestoresAV", undone.undone === "Trim" && JSON.stringify(timeline(restored)) === JSON.stringify(timeline(baseline)), {undone, restored});
+    const redone = await execute("edit.redo");
+    accepted = await execute("sequence.inspect");
+    gate("redoRestoresEdit", redone.redone === "Trim" && JSON.stringify(timeline(accepted)) === JSON.stringify(timeline(trimmed)), {redone, accepted});
+    report.steps.edit = {trimmed, restored, accepted, historyBefore, historyAfter, screenshot: await screenshot("02-edited")};
+  }
 
   const projectPath = "/projects/foundation.fcproj";
   report.steps.save = await execute("file.save", {path: projectPath});

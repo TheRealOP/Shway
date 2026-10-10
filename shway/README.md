@@ -202,6 +202,15 @@ Errors from `adapter.preview` are passed through unchanged for re-planning. Thes
 revision or interaction context (`AdapterError` code `stale`), a source too short for the take
 (`clip range must be positive and contained in its source`), missing handles, and sync locks.
 
+**Decider contract (DEV-104):** `prepareReplacement(input)` resolves the target and returns
+`{status: "candidates", correction, context, candidates: [{id, words, current, take}], …}` without any
+model call. `stageReplacement(prepared, choice, explanation, adapter)` stages only an offered `id`;
+`"no-change"`, `"review"`, the current take and any other string return `rejected` and stage nothing.
+Staging uses the snapshot revision, so a late decision fails as `stale`. `proposeReplacement` is
+prepare → Gemini → stage. For TypeSafe Jev, the candidates map to a `choice` question's `criteria`
+(`{"take-1": words, …, "no-change": …, "review": …}`). Give the model only ids and words; keep `take`
+(ids and times) on this side. The Jev client, confidence threshold and FST are not in this module.
+
 Limitations: `project.inspect` does not expose source marks, so a replacement item with a source
 In mark stages a range other than the take. The staged-range check then cancels the preview. A
 take ending in the last partial frame of its media can be rejected by the engine. Ripple trims
