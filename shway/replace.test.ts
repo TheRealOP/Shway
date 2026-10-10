@@ -9,9 +9,10 @@ import {TICKS_PER_SECOND as T} from "./takes.ts";
 import type {Take} from "./takes.ts";
 
 const F = T / 24; // 24 fps frame
+const OFF = 0.6 * F; // word times off the frame grid: rounding would clip the first/last word
 const take = (sourceItemId: number, inFrames: number, outFrames: number, text: string, statementIndex = 0): Take => ({
-  sourceItemId, sourceIn: inFrames * F + 7, sourceOut: outFrames * F - 7, statementIndex, score: 1, // word times off the frame grid
-  words: text.split(" ").map((w, i) => ({text: w, start: inFrames * F + 7 + i, end: inFrames * F + 8 + i})),
+  sourceItemId, sourceIn: inFrames * F + OFF, sourceOut: outFrames * F - OFF, statementIndex, score: 1,
+  words: text.split(" ").map((w, i) => ({text: w, start: inFrames * F + OFF + i, end: inFrames * F + OFF + 1 + i})),
 });
 // Statement 0 has three takes: in source 31 (frames 10–58), later in 31 (frames 100–160), and source 32 (frames 4–40).
 const TAKES = [
@@ -23,7 +24,7 @@ const TAKES = [
 function sequence(inFrames = 10, outFrames = 58): SequenceInspection {
   const clip = (id: number) => ({clip: id, item: 31, start: 0, duration: (outFrames - inFrames) * F, sourceIn: inFrames * F, sourceOut: outFrames * F, link: 5});
   return {id: 7, duration: (outFrames - inFrames) * F, settings: {frame_rate: {num: 24, den: 1}},
-    video: [{id: 11, items: [clip(21)]}], audio: [{id: 12, items: [clip(22), {clip: 23, item: 33, start: 0, duration: F, sourceIn: 0, sourceOut: F}]}]};
+    video: [{id: 11, items: [clip(21)]}, {id: 13, items: [{...clip(24), link: 6}]}], audio: [{id: 12, items: [clip(22), {clip: 23, item: 33, start: 0, duration: F, sourceIn: 0, sourceOut: F}]}]};
 }
 const CONTEXT = {revision: 4, sequence: 7, selection: [21], target: 21, playhead: 0};
 
@@ -99,18 +100,22 @@ test("an earlier take is reached by extending the In first", async () => {
 });
 
 test("no, several or unknown selections ask for an explicit selection without calling the model", async () => {
-  for (const selection of [[], [21, 23], [999], [22, 23]]) {
+  for (const selection of [[], [21, 23], [999], [22, 23], [21, 24]]) {
     const f = fixture();
     const r = await proposeReplacement(f.input({context: {...CONTEXT, selection}}));
     assert.equal(r.status, "need-selection", JSON.stringify(selection));
+    if (!selection.length) assert.match((r as {message: string}).message, /^Select the clip/);
     assert.deepEqual(f.calls, ["inspect"]);
   }
-  for (const context of [null, {revision: 4, sequence: 7}, {...CONTEXT, selection: [1.5]}]) {
+  for (const context of [null, {revision: 4, sequence: 7}, {sequence: 7, selection: [21]}, {...CONTEXT, selection: [1.5]}]) {
     const f = fixture();
     const r = await proposeReplacement(f.input({utterance: {transcript: {text: "use the laugh"}, context}}));
     assert.equal(r.status, "need-selection");
     assert.deepEqual(f.calls, []);
   }
+  const f = fixture();
+  assert.equal((await proposeReplacement(f.input({context: {...CONTEXT, sequence: 8}}))).status, "need-selection");
+  assert.deepEqual(f.calls, ["inspect"]);
   // The linked A/V pair counts as one clip; the audio half resolves to the same take.
   for (const selection of [[21, 22], [22]]) {
     const f = fixture();
@@ -133,7 +138,7 @@ test("missing transcript, unindexed clip or a lone take never reach the model", 
   let f = fixture();
   assert.equal((await proposeReplacement(f.input({utterance: {transcript: null, context: CONTEXT}}))).status, "rejected");
   f = fixture();
-  assert.equal((await proposeReplacement(f.input({takes: TAKES.filter(t => t.sourceItemId !== 31)}))).status, "no-take");
+  assert.equal((await proposeReplacement(f.input({takes: [take(32, 10, 58, "a b"), take(32, 100, 160, "a b c")]}))).status, "no-take");
   f = fixture();
   assert.equal((await proposeReplacement(f.input({takes: [TAKES[0], TAKES[3]]}))).status, "no-take");
   assert.ok(!f.calls.includes("generate"));
@@ -152,9 +157,13 @@ test("stale revision and engine rejections pass through for re-planning", async 
   assert.equal(f.proposal()!.expectedRevision, 3);
 });
 
-test("a preview staging another range is cancelled", async () => {
-  const f = fixture({preview: p => ({token: 9, expectedRevision: 4, label: p.label, sequence: sequence(), results: []})});
-  const r = await proposeReplacement(f.input());
-  assert.equal(r.status, "rejected");
-  assert.deepEqual(f.calls, ["inspect", "generate", "preview", "cancel"]);
+test("a preview staging another item or range is cancelled", async () => {
+  const staged = [{item: 31, sourceIn: 10 * F, duration: 48 * F}, {item: 32, sourceIn: 100 * F, duration: 60 * F},
+    {item: 31, sourceIn: 101 * F, duration: 60 * F}, {item: 31, sourceIn: 100 * F, duration: 59 * F}];
+  for (const patch of staged) {
+    const f = fixture({preview: p => {const s = sequence(); Object.assign(s.video[0].items[0], patch); return {token: 9, expectedRevision: 4, label: p.label, sequence: s, results: []};}});
+    const r = await proposeReplacement(f.input());
+    assert.equal(r.status, "rejected", JSON.stringify(patch));
+    assert.deepEqual(f.calls, ["inspect", "generate", "preview", "cancel"]);
+  }
 });

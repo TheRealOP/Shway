@@ -51,7 +51,7 @@ function target(sequence: SequenceInspection, selection: number[]): ClipInspecti
   if (picked.some(c => !c)) return "The selected clip is no longer in the sequence; select it again.";
   const [first, second] = picked as ClipInspection[];
   if (picked.length === 1) return first;
-  const linked = picked.length === 2 && first.link != null && first.link === second.link && first.item === second.item;
+  const linked = picked.length === 2 && first.link != null && first.link === second.link;
   if (!linked) return "Several clips are selected; select the one take you mean.";
   return sequence.video.some(t => t.items.includes(first)) ? first : second;
 }
