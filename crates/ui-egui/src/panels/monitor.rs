@@ -29,7 +29,10 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
     let t = app.tokens;
     let ctx = ui.ctx().clone();
     let controls_h = 28.0 + 24.0 + 36.0;
-    let video_area = Rect::from_min_max(rect.min + vec2(4.0, 4.0), pos2(rect.max.x - 4.0, rect.max.y - controls_h));
+    // Full-Screen Video: the picture takes the whole window; the controls float over its foot
+    // while the pointer moves (or rests over them)
+    let fullscreen = which == Which::Program && app.ui.video_fullscreen;
+    let video_area = if fullscreen { rect } else { Rect::from_min_max(rect.min + vec2(4.0, 4.0), pos2(rect.max.x - 4.0, rect.max.y - controls_h)) };
     // the Source monitor's time ruler starts at `origin` (a subclip restricted to its range)
     let mut origin = Tick::ZERO;
     let (target, frame_size, rate, time, duration, drop_frame, mark_in, mark_out, name) = match which {
@@ -113,7 +116,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
     if let Some(g) = grid_area {
         crate::panels::multicam::grid(app, ui, g);
     }
-    ui.painter().rect_filled(video_area, 0.0, t.panel_bg);
+    ui.painter().rect_filled(video_area, 0.0, if fullscreen { Color32::BLACK } else { t.panel_bg });
     let has_video = frame_size.0 > 0;
     // Source waveform modes: Audio Waveform (or an audio-only clip) and the video/waveform split.
     let source_item = if which == Which::Source { app.session.state.source_item } else { None };
@@ -302,6 +305,10 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
         app.ui.status = name.clone();
     }
 
+    if fullscreen && !fullscreen_controls(app, ui, rect, controls_h) {
+        return;
+    }
+
     // ---- controls row: timecode | zoom | res | wrench | duration
     let row1 = Rect::from_min_size(pos2(rect.min.x + 14.0, rect.max.y - controls_h + 2.0), vec2(rect.width() - 28.0, 26.0));
     let tc = format_time(time, rate, drop_frame, TimeDisplay::Timecode, 48000);
@@ -332,6 +339,18 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
             }
         }
     });
+    if which == Which::Program && rr.min.x - 30.0 > zr.max.x {
+        // View ▸ Full-Screen Video (F)
+        let fr = Rect::from_min_size(pos2(rr.min.x - 28.0, row1.min.y + 1.0), vec2(22.0, 22.0));
+        let tip = if fullscreen { tl!("Exit Full-Screen Video (F / Esc)") } else { tl!("Full-Screen Video (F)") };
+        let fresp = ui.interact(fr, egui::Id::new((prefix, "fullscreen")), Sense::click()).on_hover_text(tip);
+        icons::paint(ui.painter(), fr.shrink(4.0), Icon::Fullscreen, if fresp.hovered() { t.tab_text_active } else { t.icon });
+        app.auto.add("program.fullscreen", fr, tip);
+        if fresp.clicked() {
+            app.ui.video_fullscreen = !app.ui.video_fullscreen;
+            app.ui.focused = crate::dock::PanelKind::Program;
+        }
+    }
     let wr = Rect::from_min_size(pos2(rr.max.x + 6.0, row1.min.y + 1.0), vec2(22.0, 22.0));
     let wresp = ui.interact(wr, egui::Id::new((prefix, "wrench")), Sense::click());
     icons::paint(ui.painter(), wr.shrink(4.0), Icon::Wrench, if wresp.hovered() { t.tab_text_active } else { t.icon });
@@ -394,6 +413,32 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
     // ---- transport buttons
     let row3 = Rect::from_min_size(pos2(rect.min.x, bar.max.y + 4.0), vec2(rect.width(), 32.0));
     transport(app, ui, row3, which);
+}
+
+/// The floating controls of the full-screen video: shown while the pointer is in the window and
+/// has moved in the last two seconds or rests over the controls. Draws their backdrop and the
+/// exit button (`program.exitFullscreen`); returns whether the controls are to be drawn.
+fn fullscreen_controls(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, controls_h: f32) -> bool {
+    let strip = Rect::from_min_max(pos2(rect.min.x, rect.max.y - controls_h - 8.0), rect.max);
+    let (at, still) = ui.input(|i| (i.pointer.hover_pos(), i.pointer.time_since_last_movement()));
+    let show = at.is_some_and(|p| rect.contains(p) && (still < 2.0 || strip.contains(p)));
+    if !show {
+        return false;
+    }
+    // look again when the controls are due to fade
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+    ui.painter().rect_filled(strip, 0.0, Color32::from_black_alpha(190));
+    let t = app.tokens;
+    let xr = Rect::from_min_size(pos2(rect.max.x - 44.0, rect.min.y + 12.0), vec2(32.0, 32.0));
+    let tip = tl!("Exit Full-Screen Video (F / Esc)");
+    let resp = ui.interact(xr, egui::Id::new("program-exit-fullscreen"), Sense::click()).on_hover_text(tip);
+    app.auto.add("program.exitFullscreen", xr, tip);
+    ui.painter().rect_filled(xr, 6.0, Color32::from_black_alpha(if resp.hovered() { 230 } else { 150 }));
+    icons::paint(ui.painter(), xr.shrink(8.0), Icon::Close, if resp.hovered() { t.tab_text_active } else { t.icon });
+    if resp.clicked() {
+        app.ui.video_fullscreen = false;
+    }
+    true
 }
 
 /// How many of a paused monitor's latest requests are remembered ([`asked_before`]): about a

@@ -150,11 +150,35 @@ pub enum DockNode {
     Tabs {
         panels: Vec<PanelKind>,
         active: usize,
+        /// Panels of this group that are hidden (View ▸ Panels): they keep their place in the
+        /// group, so showing one again puts it back where it was.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        hidden: Vec<PanelKind>,
     },
 }
 
 fn tabs(p: &[PanelKind], active: usize) -> DockNode {
-    DockNode::Tabs { panels: p.to_vec(), active }
+    DockNode::Tabs { panels: p.to_vec(), active, hidden: Vec::new() }
+}
+/// A group whose panels are all hidden until shown (the Shway workspace's tucked-away panels).
+fn hidden_tabs(p: &[PanelKind]) -> DockNode {
+    DockNode::Tabs { panels: p.to_vec(), active: 0, hidden: p.to_vec() }
+}
+
+/// Focus mode keeps only the video and the Assistant chat on show.
+pub fn focus_keeps(p: PanelKind) -> bool {
+    matches!(p, PanelKind::Program | PanelKind::Assistant)
+}
+
+/// The panels of a group that are on show (not hidden, and kept by focus mode when it is on).
+fn shown_tabs(panels: &[PanelKind], hidden: &[PanelKind], focus: bool) -> Vec<PanelKind> {
+    panels.iter().copied().filter(|p| !hidden.contains(p) && (!focus || focus_keeps(*p))).collect()
+}
+
+/// The tab a group displays: its active tab, or its first shown one when that is hidden.
+fn displayed(panels: &[PanelKind], active: usize, hidden: &[PanelKind], focus: bool) -> Option<PanelKind> {
+    let shown = shown_tabs(panels, hidden, focus);
+    panels.get(active).filter(|p| shown.contains(p)).or(shown.first()).copied()
 }
 fn hsplit(size: SplitSize, a: DockNode, b: DockNode) -> DockNode {
     DockNode::Split { vertical: false, size, a: Box::new(a), b: Box::new(b) }
@@ -163,7 +187,10 @@ fn vsplit(size: SplitSize, a: DockNode, b: DockNode) -> DockNode {
     DockNode::Split { vertical: true, size, a: Box::new(a), b: Box::new(b) }
 }
 
-pub const WORKSPACES: [&str; 9] = ["Editing", "Assembly", "Color", "Effects", "Audio", "Captions and Graphics", "Learning", "Review", "All Panels"];
+/// The chat-first workspace new users start in (see [`WorkspacePrefs::shway_default`]).
+pub const SHWAY: &str = "Shway";
+
+pub const WORKSPACES: [&str; 11] = ["Shway", "Pro", "Editing", "Assembly", "Color", "Effects", "Audio", "Captions and Graphics", "Learning", "Review", "All Panels"];
 
 /// The user's workspaces file, beside `preferences.json` in the data directory.
 pub const WORKSPACES_FILE: &str = "workspaces.json";
@@ -175,6 +202,9 @@ pub const WORKSPACES_FILE: &str = "workspaces.json";
 pub struct WorkspacePrefs {
     pub saved: Vec<SavedWorkspace>,
     pub current: String,
+    /// Set once the app has switched this user to the Shway workspace (a one-time move on the
+    /// first launch of a Shway build); after that the workspace they choose is reopened.
+    pub shway_default: bool,
 }
 
 /// A named layout. `layout` is a [`DockNode`] kept as JSON, so one unreadable entry (a panel a
@@ -238,6 +268,25 @@ pub fn workspace(name: &str) -> DockNode {
     use SplitSize::*;
     let bottom_editing = || hsplit(FixedA(64.0), tabs(&[Tools], 0), hsplit(FixedB(116.0), tabs(&[Timeline], 0), tabs(&[AudioMeters], 0)));
     match name {
+        // Chat-first: the Assistant on the left, the Program video on the right over a slim
+        // Timeline. Every other panel is in its usual place but hidden (View ▸ Panels shows it).
+        "Shway" => hsplit(
+            Ratio(0.36),
+            tabs(&[Assistant], 0),
+            vsplit(
+                FixedB(220.0),
+                hsplit(
+                    FixedB(340.0),
+                    hsplit(Ratio(0.5), hidden_tabs(&[Source, EffectControls, AudioClipMixer, Metadata]), tabs(&[Program], 0)),
+                    hidden_tabs(&[Properties, EssentialGraphics, Text]),
+                ),
+                hsplit(
+                    Ratio(0.29),
+                    hidden_tabs(&[Project, MediaBrowser, Libraries, Info, Effects, Markers, History]),
+                    hsplit(FixedA(64.0), hidden_tabs(&[Tools]), hsplit(FixedB(116.0), tabs(&[Timeline], 0), hidden_tabs(&[AudioMeters]))),
+                ),
+            ),
+        ),
         "Assembly" => vsplit(
             Ratio(0.52),
             hsplit(
@@ -292,7 +341,7 @@ pub fn workspace(name: &str) -> DockNode {
             ),
             hsplit(Ratio(0.26), tabs(&[Project, MediaBrowser, Libraries, Info, Effects, Markers, History], 0), bottom_editing()),
         ),
-        // Editing (default), Learning, Review — Premiere 26 factory layout:
+        // Pro, Editing, Learning, Review — Premiere 26 factory layout:
         // top: Source group | Program | Properties; bottom: Project group | Tools | Timeline | Meters.
         _ => vsplit(
             Ratio(0.57),
@@ -311,6 +360,49 @@ pub fn workspace(name: &str) -> DockNode {
 }
 
 impl DockNode {
+    /// A single group holding `p` (Maximize Frame).
+    pub fn single(p: PanelKind) -> DockNode {
+        tabs(&[p], 0)
+    }
+    /// Whether any panel of this subtree is on show.
+    pub fn any_shown(&self, focus: bool) -> bool {
+        match self {
+            DockNode::Split { a, b, .. } => a.any_shown(focus) || b.any_shown(focus),
+            DockNode::Tabs { panels, hidden, .. } => !shown_tabs(panels, hidden, focus).is_empty(),
+        }
+    }
+    /// Whether `p` is in the layout but hidden.
+    pub fn is_hidden(&self, p: PanelKind) -> bool {
+        match self {
+            DockNode::Split { a, b, .. } => a.is_hidden(p) || b.is_hidden(p),
+            DockNode::Tabs { hidden, .. } => hidden.contains(&p),
+        }
+    }
+    /// Hide `p` where it is (View ▸ Panels). Returns false if it is not in the layout.
+    pub fn hide(&mut self, p: PanelKind) -> bool {
+        match self {
+            DockNode::Split { a, b, .. } => a.hide(p) || b.hide(p),
+            DockNode::Tabs { panels, hidden, .. } => {
+                if !panels.contains(&p) {
+                    return false;
+                }
+                if !hidden.contains(&p) {
+                    hidden.push(p);
+                }
+                true
+            }
+        }
+    }
+    /// Show a hidden panel again, in the place it was hidden from.
+    pub fn unhide(&mut self, p: PanelKind) {
+        match self {
+            DockNode::Split { a, b, .. } => {
+                a.unhide(p);
+                b.unhide(p);
+            }
+            DockNode::Tabs { hidden, .. } => hidden.retain(|x| *x != p),
+        }
+    }
     /// Every panel in the tree.
     pub fn panels(&self, out: &mut Vec<PanelKind>) {
         match self {
@@ -330,7 +422,7 @@ impl DockNode {
     pub fn activate(&mut self, p: PanelKind) -> bool {
         match self {
             DockNode::Split { a, b, .. } => a.activate(p) || b.activate(p),
-            DockNode::Tabs { panels, active } => {
+            DockNode::Tabs { panels, active, .. } => {
                 if let Some(i) = panels.iter().position(|x| *x == p) {
                     *active = i;
                     true
@@ -343,7 +435,7 @@ impl DockNode {
     pub fn is_visible(&self, p: PanelKind) -> bool {
         match self {
             DockNode::Split { a, b, .. } => a.is_visible(p) || b.is_visible(p),
-            DockNode::Tabs { panels, active } => panels.get(*active) == Some(&p),
+            DockNode::Tabs { panels, active, hidden } => displayed(panels, *active, hidden, false) == Some(p),
         }
     }
     /// Close a panel (remove its tab; empty groups collapse their split).
@@ -357,8 +449,9 @@ impl DockNode {
             } else if empty(b) {
                 *self = (**a).clone();
             }
-        } else if let DockNode::Tabs { panels, active } = self {
+        } else if let DockNode::Tabs { panels, active, hidden } = self {
             panels.retain(|x| *x != p);
+            hidden.retain(|x| *x != p);
             *active = (*active).min(panels.len().saturating_sub(1));
         }
     }
@@ -391,7 +484,7 @@ impl DockNode {
         fn add(n: &mut DockNode, p: PanelKind, near: PanelKind) -> bool {
             match n {
                 DockNode::Split { a, b, .. } => add(a, p, near) || add(b, p, near),
-                DockNode::Tabs { panels, active } => {
+                DockNode::Tabs { panels, active, .. } => {
                     if panels.contains(&near) {
                         panels.push(p);
                         *active = panels.len() - 1;
@@ -445,14 +538,32 @@ fn split_first(size: SplitSize, avail: f32) -> f32 {
     want.clamp(lo, hi)
 }
 
-/// Lay out the tree into group rects (with `gap` gutters) and handle gutter dragging.
-pub fn layout(ui: &mut egui::Ui, node: &mut DockNode, rect: Rect, t: &Tokens, path: &str, out: &mut Vec<Group>, reg: &mut crate::automation::Registry) {
+/// Lay out the tree into group rects (with `gap` gutters) and handle gutter dragging. Hidden
+/// panels (and, in `focus` mode, all but the video and the chat) take no room: a split whose one
+/// side shows nothing gives the other side all of it, keeping its size for when it comes back.
+#[allow(clippy::too_many_arguments)]
+pub fn layout(
+    ui: &mut egui::Ui,
+    node: &mut DockNode,
+    rect: Rect,
+    t: &Tokens,
+    path: &str,
+    focus: bool,
+    out: &mut Vec<Group>,
+    reg: &mut crate::automation::Registry,
+) {
     match node {
-        DockNode::Tabs { panels, active } => {
-            let tab_h = if panels.len() == 1 && panels[0].compact() { 8.0 } else { t.tab_h };
+        DockNode::Tabs { panels, active, hidden } => {
+            let shown = shown_tabs(panels, hidden, focus);
+            let Some(first) = shown.first().copied() else { return };
+            let tab_h = if shown.len() == 1 && first.compact() { 8.0 } else { t.tab_h };
             let content = Rect::from_min_max(pos2(rect.min.x, rect.min.y + tab_h), rect.max);
-            out.push(Group { path: path.to_string(), rect, content, panels: panels.clone(), active: *active });
+            let on = displayed(panels, *active, hidden, focus);
+            let active = shown.iter().position(|p| Some(*p) == on).unwrap_or(0);
+            out.push(Group { path: path.to_string(), rect, content, panels: shown, active });
         }
+        DockNode::Split { a, b, .. } if !b.any_shown(focus) => layout(ui, a, rect, t, &format!("{path}a"), focus, out, reg),
+        DockNode::Split { a, b, .. } if !a.any_shown(focus) => layout(ui, b, rect, t, &format!("{path}b"), focus, out, reg),
         DockNode::Split { vertical, size, a, b } => {
             let g = t.gap;
             let total = if *vertical { rect.height() } else { rect.width() };
@@ -491,8 +602,8 @@ pub fn layout(ui: &mut egui::Ui, node: &mut DockNode, rect: Rect, t: &Tokens, pa
             if resp.dragged() || resp.hovered() {
                 ui.painter().rect_filled(gutter, 0.0, t.focus.gamma_multiply(if resp.dragged() { 0.9 } else { 0.4 }));
             }
-            layout(ui, a, ra, t, &format!("{path}a"), out, reg);
-            layout(ui, b, rb, t, &format!("{path}b"), out, reg);
+            layout(ui, a, ra, t, &format!("{path}a"), focus, out, reg);
+            layout(ui, b, rb, t, &format!("{path}b"), focus, out, reg);
         }
     }
 }
@@ -517,7 +628,7 @@ pub fn draw_group_chrome(
     let painter = ui.painter().clone();
     painter.rect_filled(g.rect, t.radius, t.panel_bg);
     let active_panel = g.panels.get(g.active).copied();
-    let compact = g.panels.len() == 1 && g.panels[0].compact();
+    let compact = g.panels.len() == 1 && g.panels.first().is_some_and(|p| p.compact());
     if compact {
         // grip dots
         let c = pos2(g.rect.center().x, g.rect.min.y + 4.0);
@@ -782,5 +893,51 @@ mod tests {
         let s = serde_json::to_string(&d).unwrap();
         let back: DockNode = serde_json::from_str(&s).unwrap();
         assert_eq!(back, d);
+    }
+
+    #[test]
+    fn shway_workspace_is_chat_first() {
+        let d = workspace(SHWAY);
+        for p in [PanelKind::Assistant, PanelKind::Program, PanelKind::Timeline] {
+            assert!(d.is_visible(p) && !d.is_hidden(p), "{p:?} on show");
+        }
+        for p in [PanelKind::Source, PanelKind::Project, PanelKind::EffectControls, PanelKind::MediaBrowser, PanelKind::AudioMeters, PanelKind::Tools] {
+            assert!(d.contains(p) && d.is_hidden(p), "{p:?} tucked away");
+        }
+        // the chat is the left column
+        let DockNode::Split { vertical: false, a, .. } = &d else { panic!("left/right split") };
+        assert_eq!(**a, tabs(&[PanelKind::Assistant], 0));
+        assert_eq!(workspace("Pro"), workspace("Editing"));
+    }
+
+    #[test]
+    fn hide_then_show_restores_the_place() {
+        let mut d = workspace("Editing");
+        let before = d.clone();
+        assert!(d.hide(PanelKind::Project));
+        assert!(d.contains(PanelKind::Project) && d.is_hidden(PanelKind::Project) && !d.is_visible(PanelKind::Project));
+        // the group shows its next panel meanwhile; a round trip through JSON keeps the hidden list
+        assert!(d.is_visible(PanelKind::MediaBrowser));
+        let back: DockNode = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(back, d);
+        d.unhide(PanelKind::Project);
+        assert_eq!(d, before);
+        // an old layout without `hidden` still loads
+        let old: DockNode = serde_json::from_str(r#"{"Tabs":{"panels":["Program"],"active":0}}"#).unwrap();
+        assert_eq!(old, DockNode::single(PanelKind::Program));
+    }
+
+    #[test]
+    fn focus_mode_and_hidden_groups_take_no_room() {
+        let d = workspace(SHWAY);
+        assert!(d.any_shown(true));
+        let mut only_hidden = hidden_tabs(&[PanelKind::Source]);
+        assert!(!only_hidden.any_shown(false));
+        assert!(!only_hidden.hide(PanelKind::Program));
+        let pro = workspace("Pro");
+        let mut v = Vec::new();
+        pro.panels(&mut v);
+        let kept: Vec<_> = v.into_iter().filter(|p| focus_keeps(*p)).collect();
+        assert_eq!(kept, [PanelKind::Program]);
     }
 }

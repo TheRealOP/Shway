@@ -565,8 +565,18 @@ impl FilmcraftApp {
             }
         }
         if prev.is_none() && !self.workspace_restored {
-            // reopen the workspace in use when the app last closed
             self.workspace_restored = true;
+            if self.workspaces_path().is_some() && !self.workspaces.shway_default {
+                // Once, on the first launch of a Shway build: open the chat-first Shway
+                // workspace. After that the user's own choice is reopened.
+                let mut next = self.workspaces.clone();
+                next.shway_default = true;
+                next.current = dock::SHWAY.to_string();
+                if let Err(e) = self.set_workspaces(next) {
+                    self.ui.status = e;
+                }
+            }
+            // reopen the workspace in use when the app last closed
             if let Some(w) = dock::find(&self.workspaces, &self.workspaces.current) {
                 self.set_workspace(&w);
             }
@@ -654,9 +664,38 @@ impl FilmcraftApp {
         if name == "Color" {
             self.ui.show_scopes = false;
         }
+        self.ui.focus_mode = false;
+        if !self.ui.dock.is_visible(self.ui.focused) {
+            self.ui.focused = PanelKind::Program;
+        }
+    }
+
+    /// View ▸ Panels ▸ <panel>: hide a panel that is on show (it keeps its place), or show it
+    /// again where it was. Returns whether it is now shown.
+    pub fn toggle_panel(&mut self, p: PanelKind) -> bool {
+        let shown = self.ui.dock.contains(p) && !self.ui.dock.is_hidden(p) && (!self.ui.focus_mode || dock::focus_keeps(p));
+        if shown {
+            self.ui.dock.hide(p);
+            if self.ui.focused == p {
+                self.ui.focused = PanelKind::Program;
+            }
+            false
+        } else {
+            self.show_panel(p);
+            true
+        }
     }
 
     pub fn show_panel(&mut self, p: PanelKind) {
+        // showing a panel brings it out of hiding (in its old place), out of focus mode and out
+        // of the full-screen video
+        self.ui.dock.unhide(p);
+        if self.ui.focus_mode && !dock::focus_keeps(p) {
+            self.ui.focus_mode = false;
+        }
+        if p != PanelKind::Program {
+            self.ui.video_fullscreen = false;
+        }
         if p == PanelKind::Timeline {
             self.ui.dock.restore_timeline();
         }
@@ -1158,6 +1197,10 @@ impl FilmcraftApp {
                 hook(&items);
             }
         }
+        // Esc leaves the full-screen video (F, its shortcut in the Program monitor, toggles it)
+        if self.ui.video_fullscreen && self.dialog.is_none() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            self.ui.video_fullscreen = false;
+        }
         if ctx.egui_wants_keyboard_input() || self.dialog == Some(Dialog::Shortcuts) {
             return;
         }
@@ -1358,6 +1401,10 @@ impl FilmcraftApp {
         let t = self.tokens;
         let full = ui.max_rect();
         ui.painter().rect_filled(full, 0.0, t.app_bg);
+        if self.ui.video_fullscreen && self.ui.mode == state::Mode::Edit {
+            self.fullscreen_video(ui, full);
+            return;
+        }
         let header_h = if self.ui.show_header { 38.0 } else { 0.0 };
         let header = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), header_h));
         if self.ui.show_header {
@@ -1482,16 +1529,31 @@ impl FilmcraftApp {
         .to_string()
     }
 
+    /// Full-Screen Video: the Program monitor alone fills the window, its controls showing while
+    /// the pointer moves (drawn by the monitor). Playback and scrub keys keep working; F or Esc
+    /// (or the monitor's exit button) leave.
+    fn fullscreen_video(&mut self, ui: &mut egui::Ui, full: egui::Rect) {
+        let ctx = ui.ctx().clone();
+        ui.painter().rect_filled(full, 0.0, egui::Color32::BLACK);
+        self.ui.focused = PanelKind::Program;
+        self.auto.add("panel.Program", full, "Program");
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(full).id_salt(("panel", PanelKind::Program.id())));
+        child.set_clip_rect(full);
+        panels::show(self, &mut child, PanelKind::Program, full);
+        panels::dialogs::show(self, &ctx);
+        self.watch_jobs(&ctx);
+    }
+
     fn dock_area(&mut self, ui: &mut egui::Ui, body: egui::Rect) {
         let t = self.tokens;
         // Maximize or Restore Frame (` / Shift+`): the maximized panel fills the dock area.
         let maximized = self.ui.keys.maximized.filter(|p| self.ui.dock.contains(*p));
         let mut dock = match maximized {
-            Some(p) => dock::DockNode::Tabs { panels: vec![p], active: 0 },
-            None => std::mem::replace(&mut self.ui.dock, dock::DockNode::Tabs { panels: vec![], active: 0 }),
+            Some(p) => dock::DockNode::single(p),
+            None => std::mem::replace(&mut self.ui.dock, dock::DockNode::single(PanelKind::Program)),
         };
         let mut groups = Vec::new();
-        dock::layout(ui, &mut dock, body, &t, "", &mut groups, &mut self.auto);
+        dock::layout(ui, &mut dock, body, &t, "", self.ui.focus_mode && maximized.is_none(), &mut groups, &mut self.auto);
         let mut actions = Vec::new();
         let seqs = dock::SeqTabs {
             open: self

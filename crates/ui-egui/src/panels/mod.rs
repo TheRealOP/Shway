@@ -243,7 +243,7 @@ pub fn panel_menu_popup(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
                 close = true;
             }
             if ui.button(tl!("Maximize Frame")).clicked() {
-                app.ui.dock = crate::dock::DockNode::Tabs { panels: vec![p], active: 0 };
+                app.ui.dock = crate::dock::DockNode::single(p);
                 close = true;
             }
             if ui.button(tl!("Restore Workspace")).clicked() {

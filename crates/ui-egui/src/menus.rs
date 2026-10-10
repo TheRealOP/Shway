@@ -93,9 +93,15 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     uic!("assistant.send", "Send to Assistant", [], None),
     uic!("assistant.accept", "Accept Assistant Edit", [], None),
     uic!("assistant.reject", "Reject Assistant Edit", [], None),
+    // F is the Program monitor's shortcut (see `external_commands`): elsewhere F stays Match Frame.
+    uic!("view.videoFullscreen", "Full-Screen Video", ["View"], None),
+    uic!("view.focusMode", "Focus Mode", ["View"], Some("Cmd+Shift+\\")),
+    uic!("view.windowFullscreen", "Full Screen", ["View"], Some("Cmd+Ctrl+F")),
     uic!("view.theme.dark", "Darkest", ["View", "Appearance"], None),
     uic!("view.theme.medium", "Medium", ["View", "Appearance"], None),
     uic!("view.theme.light", "Light", ["View", "Appearance"], None),
+    uic!("window.workspace.shway", "Shway", ["Window", "Workspaces"], None),
+    uic!("window.workspace.pro", "Pro", ["Window", "Workspaces"], None),
     uic!("window.workspace.editing", "Editing", ["Window", "Workspaces"], Some("Alt+Shift+1")),
     uic!("window.workspace.assembly", "Assembly", ["Window", "Workspaces"], Some("Alt+Shift+2")),
     uic!("window.workspace.color", "Color", ["Window", "Workspaces"], Some("Alt+Shift+3")),
@@ -156,6 +162,16 @@ pub fn panel_command_id(p: PanelKind) -> String {
     format!("window.panel.{}", p.id())
 }
 
+/// View ▸ Panels ▸ <panel>: hide or show the panel in place.
+pub fn panel_toggle_id(p: PanelKind) -> String {
+    format!("view.panel.{}", p.id())
+}
+
+/// Whether `p` is on show (in the layout, not hidden, not left out by focus mode).
+pub fn panel_shown(app: &FilmcraftApp, p: PanelKind) -> bool {
+    app.ui.dock.contains(p) && !app.ui.dock.is_hidden(p) && (!app.ui.focus_mode || crate::dock::focus_keeps(p))
+}
+
 /// Explicit monitor parameters override keyboard focus.
 pub fn targets_source(app: &FilmcraftApp, params: &Value) -> bool {
     match params.get("monitor").and_then(Value::as_str) {
@@ -214,6 +230,34 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut params:
         let p = PanelKind::from_name(rest).ok_or_else(|| format!("unknown panel `{rest}`"))?;
         app.show_panel(p);
         return Ok(Value::Null);
+    }
+    if let Some(rest) = id.strip_prefix("view.panel.") {
+        let p = PanelKind::from_name(rest).ok_or_else(|| format!("unknown panel `{rest}`"))?;
+        let shown = app.toggle_panel(p);
+        return Ok(json!({"panel": p.title(), "shown": shown}));
+    }
+    match id {
+        "view.videoFullscreen" => {
+            app.ui.video_fullscreen = !app.ui.video_fullscreen;
+            if app.ui.video_fullscreen {
+                app.ui.mode = Mode::Edit;
+                app.ui.focused = PanelKind::Program;
+            }
+            return Ok(json!({"videoFullscreen": app.ui.video_fullscreen}));
+        }
+        "view.focusMode" => {
+            app.ui.focus_mode = !app.ui.focus_mode;
+            if app.ui.focus_mode && !crate::dock::focus_keeps(app.ui.focused) {
+                app.ui.focused = PanelKind::Program;
+            }
+            return Ok(json!({"focusMode": app.ui.focus_mode}));
+        }
+        "view.windowFullscreen" => {
+            let on = !ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
+            return Ok(json!({"fullscreen": on}));
+        }
+        _ => {}
     }
     if let Some(r) = crate::panels::workspaces::route(app, id, &params) {
         return r;
@@ -555,6 +599,15 @@ pub fn menu_items(app: &FilmcraftApp) -> Vec<MenuItem> {
             it.checked = crate::panels::monitor_view::checked(app, &it.id).or(crate::panels::menu_dialogs::checked(app, &it.id));
             it.enabled &= crate::panels::monitor_view::enabled(app, &it.id);
         }
+        match it.id.as_str() {
+            "view.videoFullscreen" => it.checked = Some(app.ui.video_fullscreen),
+            "view.focusMode" => it.checked = Some(app.ui.focus_mode),
+            id => {
+                if let Some(p) = id.strip_prefix("view.panel.").and_then(PanelKind::from_name) {
+                    it.checked = Some(panel_shown(app, p));
+                }
+            }
+        }
     }
     crate::panels::workspaces::menu(app, &mut v);
     v
@@ -600,6 +653,16 @@ pub fn menu_items_for(session: &filmcraft_engine::Session) -> Vec<MenuItem> {
             label: p.title().into(),
             path: vec!["Window".into()],
             shortcut: session.shortcuts.primary(&panel_command_id(p)),
+            enabled: true,
+            checked: None,
+        });
+    }
+    for p in PanelKind::ALL {
+        out.push(MenuItem {
+            id: panel_toggle_id(p),
+            label: p.title().into(),
+            path: vec!["View".into(), "Panels".into()],
+            shortcut: session.shortcuts.primary(&panel_toggle_id(p)),
             enabled: true,
             checked: None,
         });
@@ -686,8 +749,13 @@ pub fn external_commands() -> Vec<filmcraft_engine::shortcuts::CommandInfo> {
     use filmcraft_engine::shortcuts::CommandInfo;
     let mut v: Vec<CommandInfo> =
         UI_COMMANDS.iter().chain(crate::panels::keyboard::COMMANDS).map(|c| CommandInfo::new(c.id, c.label, c.menu, c.shortcut)).collect();
+    // Full-Screen Video is F in the Program monitor (Match Frame keeps F everywhere else)
+    if let Some(c) = v.iter_mut().find(|c| c.id == "view.videoFullscreen") {
+        c.defaults = vec![("F".into(), Some("Program".into()))];
+    }
     for p in PanelKind::ALL {
         v.push(CommandInfo::new(&panel_command_id(p), p.title(), &["Window"], p.window_shortcut()));
+        v.push(CommandInfo::new(&panel_toggle_id(p), p.title(), &["View", "Panels"], None));
     }
     v
 }

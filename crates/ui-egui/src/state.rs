@@ -369,6 +369,12 @@ pub struct UiState {
     pub dock: DockNode,
     /// Focused panel (blue outline, receives shortcuts).
     pub focused: PanelKind,
+    /// View ▸ Focus Mode: only the video and the Assistant chat are on show (the layout is kept).
+    #[serde(default)]
+    pub focus_mode: bool,
+    /// View ▸ Full-Screen Video: the Program video fills the whole window (F / Esc).
+    #[serde(default)]
+    pub video_fullscreen: bool,
     pub timeline: TimelineView,
     pub program: MonitorView,
     pub source: MonitorView,
@@ -863,6 +869,8 @@ impl Default for UiState {
             workspace: "Editing".into(),
             dock: crate::dock::workspace("Editing"),
             focused: PanelKind::Timeline,
+            focus_mode: false,
+            video_fullscreen: false,
             timeline: TimelineView::default(),
             program: MonitorView::default(),
             source: MonitorView::default(),
