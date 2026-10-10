@@ -2,6 +2,16 @@
 
 Current local results: [foundation evidence](foundation-evidence.md).
 
+**Demo page status 2026-10-10 (DEV-93):** [surface/demo.html](../../surface/README.md) runs the
+editor next to the Shway panel. Verified in Claude's browser pane with synthetic events, the PR #2
+engine build and the demo project (no camera or mic): the adapter connects; swipe, step, chop and
+panel Undo drive the editor; a real trim proposal previews without changing the timeline; accept by
+double tap and by `A`, reject by `X`, and Undo each act once; brief validation and the missing
+first-cut/replacement hooks report clearly; camera and microphone denial is reported; no horizontal
+scroll at 400 px. Not verified: live camera or microphone, the still-pinch talk gesture with a real hand,
+visible editor rendering (the pane was hidden, so the editor did not paint), and the first-cut and
+replacement flows (their modules are not built yet).
+
 ## Complete creator workflow
 
 - Real source footage imports, plays, edits, undoes, and exports.

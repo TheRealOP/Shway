@@ -67,7 +67,7 @@ export function createProposals(adapter, onChange) {
       const old = pending;
       pending = { token: p.token, label: String(p.label ?? "Proposal") };
       if (old) await adapter.cancel(old.token).catch(() => {}); // already gone is fine
-      return `Previewing: ${pending.label}`;
+      return ""; // the bar's title already names it
     }),
     accept: () => run(async () => {
       if (!pending) return "Nothing to accept.";
