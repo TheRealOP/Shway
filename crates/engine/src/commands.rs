@@ -2643,7 +2643,7 @@ fn build() -> Vec<CommandSpec> {
         query!(
             "proposal.preview",
             "Preview Edit Proposal",
-            r#"{"expectedRevision":u64,"sequence":id,"label":str,"steps":[{"command":"timeline.trim"|"clip.replaceFromBin","params":typed}]}; max 16; trim requires clip/source/edge/mode/deltaFrames; replace requires clips/item/keepSourceIn?"#,
+            r#"{"expectedRevision":u64,"sequence":id,"label":str,"steps":[{"command":"timeline.trim"|"clip.replaceFromBin"|"timeline.place","params":typed}]}; max 16; trim requires clip/source/edge/mode/deltaFrames; replace requires clips/item/keepSourceIn?; place requires ranges:[{item,sourceIn,sourceOut}] (frame-aligned ticks, max 32, appended in order on V1/A1)"#,
             crate::proposals::preview
         ),
         query!("proposal.inspect", "Inspect Edit Proposal", r#"{"token":id}"#, |s, p| crate::proposals::inspect(s, p)),

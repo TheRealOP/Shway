@@ -17,12 +17,20 @@ export interface ReplaceStep {
   command: "clip.replaceFromBin";
   params: {clips: number[]; item: number; keepSourceIn?: boolean};
 }
+// Source ticks on the active sequence's frame grid; use alignRange() to round explicitly.
+export interface SourceRange {item: number; sourceIn: number; sourceOut: number}
+export interface PlaceStep {
+  command: "timeline.place";
+  params: {ranges: SourceRange[]};
+}
 export interface EditProposal {
   expectedRevision: number;
   sequence: number;
   label: string;
-  steps: (TrimStep | ReplaceStep)[];
+  steps: (TrimStep | ReplaceStep | PlaceStep)[];
 }
+export interface FrameRate {num: number; den: number}
+const TICKS_PER_SECOND = 254016000000n;
 export interface ProjectInspection {
   revision: number;
   activeSequence: number | null;
@@ -47,6 +55,7 @@ export interface SequenceInspection {
   duration: number;
   video: TrackInspection[];
   audio: TrackInspection[];
+  settings?: {frame_rate?: FrameRate; [field: string]: unknown};
   [field: string]: unknown;
 }
 export interface ProposalPreview {
@@ -129,7 +138,7 @@ function proposalInput(value: EditProposal): EditProposal {
   const checkedLabel = label(input.label);
   if (!Array.isArray(input.steps) || input.steps.length === 0 || input.steps.length > 16) invalid("proposal requires 1–16 steps");
   let targets = 0;
-  const steps = Array.from(input.steps, (value, i): TrimStep | ReplaceStep => {
+  const steps = Array.from(input.steps, (value, i): TrimStep | ReplaceStep | PlaceStep => {
     const step = object(value, `steps[${i}]`); keys(step, ["command", "params"], `steps[${i}]`);
     const params = object(step.params, `steps[${i}].params`);
     if (step.command === "timeline.trim") {
@@ -149,6 +158,19 @@ function proposalInput(value: EditProposal): EditProposal {
       targets += clips.length;
       return {command: step.command, params: {clips, item, ...(params.keepSourceIn === undefined ? {} : {keepSourceIn: params.keepSourceIn})}};
     }
+    if (step.command === "timeline.place") {
+      keys(params, ["ranges"], "place");
+      if (!Array.isArray(params.ranges) || params.ranges.length === 0 || params.ranges.length > 32) invalid("place requires 1–32 ranges");
+      const ranges = Array.from(params.ranges, (value, j): SourceRange => {
+        const range = object(value, `ranges[${j}]`); keys(range, ["item", "sourceIn", "sourceOut"], `ranges[${j}]`);
+        const item = integer(range.item, `ranges[${j}].item`, 1), sourceIn = integer(range.sourceIn, `ranges[${j}].sourceIn`);
+        const sourceOut = integer(range.sourceOut, `ranges[${j}].sourceOut`);
+        if (sourceOut <= sourceIn) invalid(`ranges[${j}] must have sourceIn < sourceOut`);
+        return {item, sourceIn, sourceOut};
+      });
+      targets += ranges.length;
+      return {command: step.command, params: {ranges}};
+    }
     return invalid(`Unsupported proposal command: ${String(step.command)}`);
   });
   if (targets > 32) invalid("proposal exceeds 32 targets");
@@ -166,6 +188,23 @@ function binItem(root: unknown, item: number): {type: unknown; duration: unknown
     if (Array.isArray(entry.children)) stack.push(...entry.children.slice(0, 100_000));
   }
   return null;
+}
+
+// Explicit boundary rounding: widen a source range outward (In down, Out up) to the exact frame
+// grid of `rate` (sequence.settings.frame_rate), matching FilmCraft's frame_at/tick_of. Exact
+// BigInt arithmetic; an Out widened past the source end is still rejected by the engine.
+export function alignRange(range: SourceRange, rate: FrameRate): SourceRange {
+  const value = object(range, "range");
+  const item = integer(value.item, "range.item", 1), sourceIn = integer(value.sourceIn, "range.sourceIn"), sourceOut = integer(value.sourceOut, "range.sourceOut");
+  const num = BigInt(integer(rate?.num, "rate.num", 1)), den = BigInt(integer(rate?.den, "rate.den", 1));
+  if (num > 1000n * den) invalid("rate must be <= 1000 fps");
+  const tickOf = (frame: bigint) => (frame * TICKS_PER_SECOND * den + num - 1n) / num;
+  const floor = (ticks: number) => tickOf(BigInt(ticks) * num / (TICKS_PER_SECOND * den));
+  const start = floor(sourceIn), down = floor(sourceOut);
+  const out = down === BigInt(sourceOut) ? down : tickOf(BigInt(sourceOut) * num / (TICKS_PER_SECOND * den) + 1n);
+  if (out > BigInt(Number.MAX_SAFE_INTEGER)) invalid("range exceeds exact tick range");
+  if (out <= start) invalid("range must have sourceIn < sourceOut");
+  return {item, sourceIn: Number(start), sourceOut: Number(out)};
 }
 
 export class ShwayAdapter {
@@ -264,6 +303,14 @@ export class ShwayAdapter {
       try {await this.#execute("proposal.cancel", {token: checkedToken});} catch {}
       throw error;
     }
+  }
+
+  // First cut: append source ranges, in order, with linked audio on V1/A1 as one preview.
+  // Commit the returned token for a single undo step, or cancel it to leave the project untouched.
+  async assemble(input: {expectedRevision: number; sequence: number; label: string; ranges: SourceRange[]}): Promise<ProposalPreview> {
+    const value = object(input, "assembly");
+    keys(value, ["expectedRevision", "sequence", "label", "ranges"], "assembly");
+    return this.preview({expectedRevision: input.expectedRevision, sequence: input.sequence, label: input.label, steps: [{command: "timeline.place", params: {ranges: input.ranges}}]});
   }
 
   async inspectPreview(value: ProposalToken): Promise<ProposalPreview> {

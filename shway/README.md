@@ -23,12 +23,25 @@ Connection discovers command IDs and rejects engines that lack the proposal boun
 contains human-readable parameter descriptions; it is not itself a strict JSON schema. This adapter
 and Rust's typed deserializer validate the allowlisted proposal shape.
 
-The supported proposal steps are `timeline.trim` and `clip.replaceFromBin`. Proposals explicitly name
+The supported proposal steps are `timeline.trim`, `clip.replaceFromBin` and `timeline.place`. Proposals explicitly name
 expected revision, active sequence, target clips, source IDs, and frame deltas. Requests are limited
 to 16 steps, 32 total explicit target references, and labels of at most 120 UTF-8 bytes. Rust stages them in a
 disposable session. `previewFrame` returns bounded RGBA pixels from that candidate without changing
 the authoritative timeline. Explicit pending media responses retry for at most five seconds. Real
 source/decode failures, stale revisions and changed interaction context remain actionable errors.
+
+`assemble({expectedRevision, sequence, label, ranges})` builds a first cut: one `timeline.place`
+step appending `ranges: [{item, sourceIn, sourceOut}]` (source ticks) in order on V1 with linked
+audio on A1, after the active sequence's existing content. Ranges must lie on the sequence frame
+grid; `alignRange(range, sequence.settings.frame_rate)` widens word-boundary ticks explicitly
+(In down, Out up) with exact integer math. Make or activate an empty sequence first for a clean cut.
+
+```js
+const rate = sequence.settings.frame_rate;
+const ranges = takes.map(t => alignRange({item: t.item, sourceIn: t.sourceIn, sourceOut: t.sourceOut}, rate));
+const preview = await adapter.assemble({expectedRevision: project.revision, sequence: sequence.id, label: 'First cut', ranges});
+await adapter.commit(preview.token); // one undo step; or adapter.cancel(preview.token)
+```
 
 `commit` makes one normal undoable edit; `cancel` discards the candidate. Seek and normal controls
 remain available. A newer edit is preserved when a stale proposal is rejected or discarded.
