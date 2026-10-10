@@ -203,6 +203,27 @@ export class ShwayAdapter {
   play(): Promise<unknown> {return this.#transport.request("ui.playback", {action: "play"});}
   stop(): Promise<unknown> {return this.#transport.request("ui.playback", {action: "stop"});}
   seekFrame(frame: number): Promise<unknown> {return this.#execute("playhead.set", {frame: integer(frame, "frame")});}
+
+  // Gesture transport (DEV-91). Playhead moves are navigation, not project edits; cut is one edit.
+  shuttle(speed: number): Promise<unknown> {
+    if (typeof speed !== "number" || !Number.isFinite(speed) || speed === 0 || Math.abs(speed) > 8) invalid("shuttle speed must be finite, nonzero and within ±8");
+    return this.#transport.request("ui.playback", {action: "play", speed});
+  }
+  togglePlay(): Promise<unknown> {return this.#transport.request("ui.playback", {action: "toggle"});}
+  stepFrames(frames: number): Promise<unknown> {
+    const n = integer(frames, "frames", -1000);
+    if (n === 0 || n > 1000) invalid("frames must be nonzero and within ±1000");
+    return this.#execute("playhead.step", {frames: n});
+  }
+  async playhead(): Promise<number> {
+    const ui = object(await this.#transport.request("ui.inspect"), "ui.inspect response");
+    return integer(ui.playhead, "playhead");
+  }
+  seekTicks(time: number): Promise<unknown> {return this.#execute("playhead.set", {time: integer(time, "time")});}
+  nextEdit(): Promise<unknown> {return this.#execute("playhead.nextEdit");}
+  prevEdit(): Promise<unknown> {return this.#execute("playhead.prevEdit");}
+  /** Cut at the playhead (Add Edit): selected clips under it, else the targeted tracks. One undo step. */
+  cut(): Promise<unknown> {return this.#execute("sequence.addEdit");}
   async undo(): Promise<{undone: string}> {
     const result = object(await this.#execute("edit.undo"), "undo response");
     if (typeof result.undone !== "string" || !result.undone) throw new AdapterError("response", "Undo did not return an operation label");

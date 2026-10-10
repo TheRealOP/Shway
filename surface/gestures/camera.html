@@ -23,6 +23,16 @@
   dt { color: var(--muted); }
   #log { font: 12px ui-monospace, monospace; max-height: 240px; overflow: auto; white-space: pre; }
   #err { color: var(--warn); }
+  /* ?editor: the real editor fills the page, camera + readouts float in a corner */
+  body.editor { padding: 0; height: 100vh; overflow: hidden; }
+  body.editor #ed { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; }
+  body.editor > .row { position: fixed; right: 12px; bottom: 12px; z-index: 1; gap: 8px; flex-direction: column;
+    width: min(360px, calc(100% - 24px)); background: color-mix(in srgb, var(--bg) 88%, transparent); padding: 8px; border-radius: 8px; }
+  body.editor #log { display: none; }
+  body.editor .stage { width: 100%; }
+  body.editor #state { font-size: 18px; }
+  body.editor dl { font-size: 11px; margin: 4px 0; }
+  @media (max-width: 900px) { body.editor > .row { width: 240px; } body.editor dl { display: none; } }
 </style>
 </head>
 <body>
@@ -241,6 +251,37 @@ async function main() {
   video.requestVideoFrameCallback(onFrame);
 }
 main().catch((e) => { $("err").textContent = `Startup failed: ${e.message}`; });
+
+// ?editor: drive the real editor (same origin: serve this page from the editor's dist with adapter.js).
+async function connectEditor() {
+  document.body.classList.add("editor");
+  const frame = document.createElement("iframe");
+  frame.id = "ed";
+  frame.src = "index.html";
+  frame.allow = "autoplay";
+  document.body.prepend(frame);
+  const status = (text) => { $("err").textContent = text; };
+  status("Connecting to the editor…");
+  let api = null;
+  for (let i = 0; i < 1200 && !api; i++) {
+    const w = frame.contentWindow;
+    if (w?.filmcraftLoad?.fatal) return status(`Editor stopped: ${w.filmcraftLoad.fatal}`);
+    if (w?.filmcraft && w.filmcraftLoad?.readyMs) api = w.filmcraft;
+    else await new Promise((r) => setTimeout(r, 100));
+  }
+  if (!api) return status("Editor did not start within 2 minutes.");
+  const { ShwayAdapter } = await import("./adapter.js");
+  const { createBridge } = await import("./bridge.mjs");
+  const adapter = await ShwayAdapter.connect(api);
+  const bridge = createBridge(adapter, { onError: (err, e) => status(`${e.type} failed: ${err?.message ?? err}`) });
+  window.shwayGestures.adapter = adapter;
+  window.shwayGestures.bridge = bridge;
+  sinkFn = (e) => { sink(e); bridge(e); };
+  status("");
+}
+if (new URLSearchParams(location.search).has("editor")) {
+  connectEditor().catch((e) => { $("err").textContent = `Editor connection failed: ${e.message}`; });
+}
 </script>
 </body>
 </html>

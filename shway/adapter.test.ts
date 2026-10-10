@@ -219,3 +219,41 @@ test("export is constrained to H264/AAC and failed completed jobs retain error e
   assert.equal(job.finished, true);
   assert.deepEqual(job.result, {error: "Disk full"});
 });
+
+test("gesture transport maps to playback, step, seek, edit navigation and cut", async () => {
+  const {transport, calls} = fixture();
+  transport.commands = async () => [...capabilities, "playhead.step", "playhead.nextEdit", "playhead.prevEdit", "sequence.addEdit"].map(id => ({id}));
+  transport.request = async (method, params = {}) => {calls.push({command: method, params}); return method === "ui.inspect" ? {playhead: 12345} : {};};
+  const adapter = await ShwayAdapter.connect(transport);
+  await adapter.shuttle(-2);
+  await adapter.togglePlay();
+  await adapter.stepFrames(-3);
+  assert.equal(await adapter.playhead(), 12345);
+  await adapter.seekTicks(12345);
+  await adapter.nextEdit();
+  await adapter.prevEdit();
+  await adapter.cut();
+  assert.deepEqual(calls.map(c => [c.command, c.params]), [
+    ["ui.playback", {action: "play", speed: -2}], ["ui.playback", {action: "toggle"}], ["playhead.step", {frames: -3}],
+    ["ui.inspect", {}], ["playhead.set", {time: 12345}], ["playhead.nextEdit", {}], ["playhead.prevEdit", {}], ["sequence.addEdit", {}],
+  ]);
+});
+
+test("hostile gesture values never reach the engine", async () => {
+  const {transport, calls} = fixture();
+  transport.commands = async () => [...capabilities, "playhead.step"].map(id => ({id}));
+  const adapter = await ShwayAdapter.connect(transport);
+  for (const speed of [0, NaN, Infinity, -9, 8.5, "2" as unknown as number]) assert.throws(() => adapter.shuttle(speed), code("invalid"));
+  for (const frames of [0, 1001, -1001, 1.5, NaN]) assert.throws(() => adapter.stepFrames(frames), code("invalid"));
+  for (const time of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) assert.throws(() => adapter.seekTicks(time), code("invalid"));
+  assert.equal(calls.length, 0);
+  transport.request = async () => ({playhead: -5});
+  await assert.rejects(adapter.playhead(), code("invalid"));
+});
+
+test("cut and edit navigation require the engine to offer them", async () => {
+  const {transport} = fixture();
+  const adapter = await ShwayAdapter.connect(transport);
+  assert.throws(() => adapter.cut(), code("capability"));
+  assert.throws(() => adapter.nextEdit(), code("capability"));
+});

@@ -8,6 +8,7 @@ Contract: [interactions](../../docs/wiki/interactions.md).
 | `recognizer.mjs` | Pure, deterministic recognizer (`createRecognizer`, `replay`). Runs in Node and browsers, no build step. |
 | `recognizer.test.mjs` | Replay tests: `node --test surface/gestures/recognizer.test.mjs` (Node ≥ 22, no packages). |
 | `camera.html` | Camera harness: MediaPipe Hand Landmarker → recognizer → hand overlay (skeleton, pinch meter, twist dial with dead zone/speed bands/fine detents, tap dot, chop-ready blade line, gesture flash), latency, trace recorder (R). |
+| `bridge.mjs` | Gesture events → `shway/adapter.ts` calls (serialized, latest-wins shuttle). Tests: `bridge.test.mjs`. |
 | `traces/*.json` | Recorded traces (none yet). Every file is replayed by the tests; names starting `rest` must emit nothing. |
 
 The directory sits outside `apps/` because `apps/*` is a Cargo workspace glob.
@@ -41,6 +42,40 @@ The FST's `Targeting / Preview / Committed` belong to edit proposals (DEV-92), n
   engaged → `shuttle 0` + `tracking-lost`. The same for Esc → `cancel`. Control stays latched until
   engagement is released, then needs a fresh engage (new neutral).
 - Hostile input (non-finite/backwards time, garbage frames) is ignored and never throws.
+
+## Driving the editor (`bridge.mjs`)
+
+`createBridge(adapter)` maps events onto the typed gesture methods in `shway/adapter.ts`. Calls run
+one at a time, in order. Queued shuttle updates collapse to the latest rate. A failed call is reported
+and the queue carries on.
+
+| Event | Adapter call (engine) |
+| --- | --- |
+| `engage` | `playhead()` (`ui.inspect`), remembered for cancel |
+| `shuttle {rate}` | `shuttle(rate)` (`ui.playback play, speed`), or `stop()` for 0 |
+| `step {frames}` | `stepFrames` (`playhead.step`) |
+| `cancel` | `seekTicks(engage playhead)` (`playhead.set {time}`) |
+| `swipe` | `nextEdit` / `prevEdit` (`playhead.nextEdit` / `prevEdit`) |
+| `chop` | `cut()` (`sequence.addEdit`: one undo step) |
+| `double-tap` | `togglePlay()` (`ui.playback toggle`) |
+
+Run it against the real editor: build the web app (`cargo xtask web`, see [web](../../docs/web.md)), then
+`node shway/build.mjs --out <dist>`, copy `recognizer.mjs`, `bridge.mjs` and `camera.html` into `<dist>`,
+serve it, and open `camera.html?editor`. The editor loads in a same-origin iframe; the camera panel
+floats in the corner.
+
+**Verified 2026-10-10** (browser pane, PR #2 engine build, demo project, synthetic events, no camera):
+- Shuttle 2×: the playhead moved 3.0 s in 1.5 s. Stop works.
+- Fine steps: +3 frames, then −1.
+- Cancel returned the playhead to its engage position.
+- Swipes moved to the next and previous edit points.
+- Chop cut V1, A1 and A2 at the playhead, and one undo ("Add Edit") restored it.
+- Double tap toggled playback.
+
+**Limits seen:**
+- Reverse shuttle (−1×) ran at about 0.5× real time.
+- Playback only advances while the tab is visible.
+- Camera-driven end-to-end latency is unmeasured.
 
 ## Integration boundary (for the editor adapter)
 
