@@ -448,8 +448,8 @@ async function setCamera(on) {
     } else {
       for (const track of video.srcObject?.getTracks() ?? []) track.stop();
       video.srcObject = null;
-      if (voice.view().recording && voice.view().source === "gesture") talk(voice.cancel(performance.now()));
-      recognizer = createRecognizer(); hold = createHoldToTalk(); // back to Idle: no half-finished scrub or pinch survives
+      onFrame(performance.now(), null); // normal tracking loss first: stops a shuttle, aborts a pinch-held recording
+      recognizer = createRecognizer(); hold = createHoldToTalk(); // then back to Idle
       lastHand = null; flash = null;
       const c = $("o"); c.getContext("2d")?.clearRect(0, 0, c.width, c.height);
     }
