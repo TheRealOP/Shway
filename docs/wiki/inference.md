@@ -25,6 +25,20 @@ including exact sequence ticks, one undo step, `transcript.search`, three takes 
 undo). Still planned: choosing a transcription provider/worker, real creator speech, linked audio
 and multi-source sync in takes, and persisting the take index.
 
+## First-cut take choice
+
+**Status (DEV-89, planning verified; DEV-90 assembly glue planned):** [`shway/firstcut.ts`](../../shway/firstcut.ts)
+validates an editable StoryBrief and asks the model, through the local Gemini proxy, to choose one
+indexed take per script statement by opaque number. Output is checked strictly (one valid,
+statement-matching take per statement, no extra fields, one retry with the error) and every range
+time comes from the take index. Verified October 10, 2026: 22 `firstcut.test.ts` tests (fake model:
+happy path, invented/wrong-statement/duplicate/missing choices, non-JSON, retry outcomes, hostile
+briefs and takes; 15 of 16 guard mutations fail a test, the survivor is a defensive rethrow), and one
+live `gemini-3.8-flash` call on the synthetic three-take fixture that returned
+`{choices:[{statementIndex, take, reason}]}`, passed validation first time, and avoided the "uh" take.
+`assembleFirstCut` stages the ranges via DEV-90's `adapter.assemble`; not yet verified in the
+browser against a real engine. Real creator speech and brief-driven duration limits remain open.
+
 ## TRIBE flow
 
 1. Render the actual version, including accepted cuts, effects, and sound.

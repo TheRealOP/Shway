@@ -30,7 +30,7 @@ protocol. Browsers cannot directly use raw TCP. Implement one adapter, not two c
 - **MediaIndex / Take:** source ID, path, source range, word timings, statement group, linked audio.
   First cut (DEV-88): `Take {sourceItemId, sourceIn, sourceOut, words, statementIndex, score}` in
   source ticks from [`shway/takes.ts`](../../shway/takes.ts); path and linked audio not yet included.
-- **StoryBrief:** creator's editable goals and constraints.
+- **StoryBrief:** creator's editable goals and constraints. DEV-89: `{message, audience, feeling, durationSeconds?, requiredMoments?, exclusions?}` validated by `parseBrief` in [`shway/firstcut.ts`](../../shway/firstcut.ts).
 - **InteractionContext:** mode, selected clip/interval, engagement, confidence, observation timestamps.
 - **EditProposal:** expected project revision, explicit targets, supported commands, bounded parameters,
   source provenance, and explanation.
