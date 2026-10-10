@@ -86,6 +86,38 @@ bounded jobs, clear failures, and a result reference rather than giant model out
 Editing continues during inference. Changed renders invalidate displayed analysis.
 If live inference is slow, use genuine cached results for those exact renders, labeled as cached.
 
+## Comparison events
+
+A comparison of one render against an approved reference becomes zero or more **events** ("virtual
+gestures"). The panel treats them as a third input next to hands and voice. Codex owns producing them
+(DEV-96/97); `surface/demo.mjs` owns consuming them (`readTribeEvent`, `createTribeGate`). Version 1:
+
+```json
+{"version": 1, "id": "evt-…", "kind": "below-reference", "sequence": 7, "revision": 12,
+ "renderId": "sha256:…", "range": {"start": 0, "end": 254016000000}, "score": 0.42,
+ "reference": "ref-id@rev", "model": "tribev2@<checkpoint>+<code sha>"}
+```
+
+- `kind` is `below-reference` or `above-reference`: the predicted average-viewer response over `range`
+  differs from the creator's approved reference. It is never "boring", "engaging" or "low quality".
+- `sequence` and `revision` are the timeline the render was made from (`project.inspect`). `range` is in
+  sequence ticks. `score` is the divergence, normalised to 0–1. Strings are 1–128 characters.
+  Unknown fields are ignored, so evidence can be added without a version bump.
+- **Rules (gate):**
+  1. A malformed event is dropped.
+  2. A stale event is dropped: sequence or revision no longer current.
+  3. A duplicate is dropped: same `id`, or the same render and range.
+  4. While a proposal is pending, or the creator is mid-gesture or mid-utterance, the event is
+     deferred (not remembered).
+- **Effect:** the clip under the middle of `range` gets a replacement decision. The decider is
+  Gemini today and Jev by candidate id later. It may decline. A preview is shown as a *suggestion*:
+  it never displaces a pending proposal, never commits, and is accepted or rejected only by the creator.
+- **Delivery:** for now, a JSON file (one event or an array of them) in the panel, or
+  `shwayDemo.tribe(event)`. The transport from the GPU worker is not decided.
+
+Verified 2026-10-10 in the browser engine with a **replayed, hand-made** event, not TRIBE output; see
+[acceptance](acceptance.md).
+
 ## Early benchmark
 
 Try one short baseline render; record GPU model, peak memory, preprocessing time, inference time,

@@ -43,7 +43,8 @@ export function readBrief(/** @type {Record<string, unknown>} */ f) {
 
 /**
  * The one pending proposal and its Accept / Reject / Undo, through the adapter. Calls run one at a
- * time; a newer proposal discards the older one. onChange({pending, status, busy}) after every change.
+ * time; a newer proposal discards the older one. The engine stages one preview at a time, so callers
+ * reject the pending one before staging new creator input (show's cancel only cleans up). onChange({pending, status, busy}) after every change.
  * @param {{commit(t: number): Promise<{revision: number, label: string}>, cancel(t: number): Promise<unknown>, undo(): Promise<{undone: string}>}} adapter
  * @param {(s: {pending: {token: number, label: string, source: string} | null, status: string, busy: boolean}) => void} onChange
  */

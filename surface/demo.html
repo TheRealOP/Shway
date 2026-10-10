@@ -117,6 +117,15 @@
   </section>
 
   <section>
+    <h2>Predicted response (TRIBE)</h2>
+    <label for="t-events">Comparison events (JSON, contract v1)</label>
+    <input id="t-events" type="file" accept="application/json,.json">
+    <div class="note">Average-viewer predictions compared with your approved reference, not a measurement of you.
+      An event only suggests a preview; you accept or reject it.</div>
+    <div id="tribeNote" class="note" aria-live="polite"></div>
+  </section>
+
+  <section>
     <h2>Story brief</h2>
     <form id="brief" novalidate>
       <label for="b-message">Message</label>
@@ -161,7 +170,7 @@ import { createBridge } from "./gestures/bridge.mjs";
 import { openCamera, runHands, drawOverlay, flashFor, LABELS } from "./gestures/hands.mjs";
 import { createVoice } from "./voice/utterance.mjs";
 import { openMic, createCapture } from "./voice/mic.mjs";
-import { createHoldToTalk, readBrief, createProposals, loadHook } from "./demo.mjs";
+import { createHoldToTalk, readBrief, createProposals, loadHook, createTribeGate, clipAt, tribeCorrection } from "./demo.mjs";
 
 const GEMINI = "http://127.0.0.1:8790";
 const $ = (id) => document.getElementById(id);
@@ -178,7 +187,8 @@ const proposals = createProposals({
   commit: (t) => need().commit(t), cancel: (t) => need().cancel(t), undo: () => need().undo(),
 }, ({ pending, status, busy }) => {
   $("prop").dataset.pending = String(!!pending);
-  $("propLabel").textContent = pending ? `Previewing: ${pending.label}` : "No pending proposal";
+  $("propLabel").textContent = !pending ? "No pending proposal" :
+    pending.source === "tribe" ? `Suggested from predicted response: ${pending.label}` : `Previewing: ${pending.label}`;
   $("propStatus").textContent = status;
   $("accept").disabled = $("reject").disabled = busy || !pending;
   $("undo").disabled = busy;
@@ -236,6 +246,7 @@ async function utterance(u) {
     const idx = await indexFromForm();
     if (idx.error) return note(`Replacement needs the takes (Story brief): ${idx.error}`);
     if (!u.transcript) { note("Transcribing…"); u.transcript = await transcribe(u.audio, GEMINI); said(); }
+    if (proposals.pending) await proposals.reject(); // the engine stages one preview at a time; new creator input wins
     note("Proposing a replacement…");
     const r = await proposeReplacement({ utterance: u, takes: idx.takes, generate: geminiGenerate(GEMINI), adapter: need() });
     if (r?.status !== "preview") return note(r?.message ?? `Replacement: ${r?.status ?? "no result"}`);
@@ -256,6 +267,38 @@ const ptt = $("ptt");
 ptt.addEventListener("pointerdown", (e) => { ptt.setPointerCapture(e.pointerId); talk(voice.start(performance.now(), snapshot(), "button")); });
 for (const ev of ["pointerup", "pointercancel"]) ptt.addEventListener(ev, () => { if (voice.view().recording) talk(voice.stop(performance.now())); });
 (function tick() { talk(voice.tick(performance.now())); requestAnimationFrame(tick); })();
+
+// ---- TRIBE comparison events → suggestion-only previews (rules: demo.mjs createTribeGate).
+const tribeGate = createTribeGate();
+async function onTribe(raw) {
+  const note = (t) => { $("tribeNote").textContent = t; };
+  try {
+    const { project, sequence } = await need().inspect();
+    const g = tribeGate.check(raw, { sequence: sequence?.id, revision: project.revision, pending: !!proposals.pending,
+      active: voice.view().recording || recognizer.view().state !== "Idle" });
+    if ("drop" in g) return note(`TRIBE event ignored: ${g.drop}.`);
+    const clip = clipAt(sequence, g.event.range);
+    if (clip == null) return note("TRIBE event ignored: no clip under that range.");
+    const hook = await loadHook("./replace.js", ["proposeReplacement", "geminiGenerate"]);
+    if (hook.error) return note(`TRIBE suggestion: ${hook.error}`);
+    const idx = await indexFromForm();
+    if (idx.error) return note(`TRIBE suggestion needs the takes (Story brief): ${idx.error}`);
+    note("Looking for a better-fitting take…");
+    const r = await hook.module.proposeReplacement({ transcript: tribeCorrection(g.event, idx.brief.feeling), takes: idx.takes,
+      context: { revision: g.event.revision, sequence: g.event.sequence, selection: [clip] }, generate: hook.module.geminiGenerate(GEMINI), adapter: need() });
+    if (r?.status !== "preview") return note(`No suggestion: ${r?.message ?? r?.status}`);
+    note(r.explanation ?? "");
+    await proposals.show({ ...r, source: "tribe" });
+  } catch (err) { note(`TRIBE suggestion failed: ${err?.message ?? err}`); }
+}
+$("t-events").onchange = async (ev) => {
+  const f = ev.target.files[0];
+  if (!f) return;
+  if (f.size > 1 << 20) return void ($("tribeNote").textContent = "Events file is larger than 1 MB.");
+  try { for (const e of [JSON.parse(await f.text())].flat().slice(0, 100)) await onTribe(e); }
+  catch (e) { $("tribeNote").textContent = `Events file: ${e?.message ?? e}`; }
+  ev.target.value = "";
+};
 
 // ---- Take index from the brief form's script + transcripts (shared by first cut and replacement).
 // Throws on malformed transcript JSON (takes.js parseTranscript explains why).
@@ -291,6 +334,7 @@ $("brief").onsubmit = async (ev) => {
     const plan = await planFirstCut({ brief: r.brief, script: r.script, takes: r.takes, generate: proxyGenerate(`${GEMINI}/generate`) });
     $("plan").textContent = plan.choices.map((c) => `${c.statementIndex + 1}. ${c.reason}`).join("\n") +
       (plan.skipped.length ? `\nNo take for statement ${plan.skipped.map((i) => i + 1).join(", ")}` : "");
+    if (proposals.pending) await proposals.reject();
     const result = await assembleFirstCut(need(), plan);
     if (Number.isSafeInteger(result?.token)) await proposals.show(result);
     else proposals.note("First cut applied. Undo reverts it.");
@@ -333,7 +377,7 @@ function render() {
   let mode, target, effect;
   if (rec.recording) [mode, target, effect] = ["Talk", sel, "let go of the pinch / V to finish · Esc cancels"];
   else if (v.state === "Armed" || v.state === "Adjusting") [mode, target, effect] = [v.fine ? "Fine step" : `Shuttle ${v.rate}×`, "playhead", v.fine ? "twist steps frames" : "twist sets speed · release keeps position · Esc returns"];
-  else if (p) [mode, target, effect] = ["Preview", p.label, "double tap / A accepts · still pinch / X rejects and talks"];
+  else if (p) [mode, target, effect] = [p.source === "tribe" ? "Suggestion" : "Preview", p.label, "double tap / A accepts · still pinch / X rejects and talks"];
   else [mode, target, effect] = ["Navigate", "playhead", "pinch+twist scrubs · swipe next/prev edit · chop cuts · double tap play/pause · still pinch talks"];
   if (v.state === "TrackingLost" || v.state === "Cancelled") effect = LABELS[v.state];
   $("mode").textContent = mode; $("target").textContent = target; $("effect").textContent = effect;
@@ -400,7 +444,7 @@ openMic().then((m) => { if (m.error) $("voiceErr").textContent = m.error; else s
 // Automation / testing hooks.
 window.shwayDemo = {
   gesture: (e) => onGesture({ t: performance.now(), ...e }), frame: (hand, k = {}) => { Object.assign(keys, k); onFrame(performance.now(), hand); },
-  proposals, voice, get adapter() { return adapter; }, get context() { return context; }, get recognizer() { return recognizer; },
+  proposals, voice, tribe: onTribe, get adapter() { return adapter; }, get context() { return context; }, get recognizer() { return recognizer; },
 };
 render();
 </script>

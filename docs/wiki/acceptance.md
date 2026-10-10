@@ -90,3 +90,16 @@ Remove protected upstream branding from modified distributions.
   Whisper transcribed the downloaded export as "Welcome to our workshop. Today we build a gesture editor."
 - **Not verified:** real creator footage and voices, live microphone and camera on the demo page,
   sync-locked tracks, OPFS recovery across reload.
+
+**TRIBE event path, replayed event, verified 2026-10-10.** Same `--creator` run, after the replacement.
+- **Input:** one hand-made v1 event (`renderId: "replayed-sample"`) over the line-2 clip. **This is not
+  TRIBE output**; no TRIBE inference has completed.
+- **Gate:** a stale revision was dropped, then the event was accepted and mapped to the line-2 clip.
+  A second event with the same render and range was dropped as a duplicate.
+- **Live Gemini declined twice**, correctly. One reason: "take 1 includes hesitant filler and take 2
+  trails off". The indexed take had cut off "together", which is a take-index windowing limitation.
+- **Fixed decider by candidate id (the Jev path):** the suggestion staged as a preview with source
+  `tribe` and did not commit. The engine refused a second preview while it was pending, which is how
+  we found that the page must reject before staging new creator input (fixed). The creator's proposal
+  then replaced it, and rejecting restored the accepted timeline exactly.
+- 21 chain gates + 15 foundation gates passed. The export still transcribes as the corrected cut.

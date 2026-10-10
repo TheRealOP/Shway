@@ -2,7 +2,8 @@
 // Word-timed transcript → take index → live Gemini first cut → commit → typed correction on the
 // selected clip → live Gemini replacement → commit. Called by foundation.mjs --creator after import;
 // foundation.mjs then saves, undoes, reopens and exports the result. Needs adapter.js, takes.js,
-// firstcut.js and replace.js (node shway/build.mjs) next to index.html, and the Gemini proxy.
+// firstcut.js and replace.js (node shway/build.mjs) and demo.mjs (surface/build-demo.mjs) next to
+// index.html, and the Gemini proxy. A replayed sample TRIBE event then exercises the suggestion path.
 import {readFileSync} from "node:fs";
 
 export async function checkCreator({evaluate, item, transcriptPath, proxy}) {
@@ -14,7 +15,7 @@ async function browserScenario({item, transcript, proxy}) {
   const {ShwayAdapter} = await import('/adapter.js');
   const {parseTranscript, indexTakes} = await import('/takes.js');
   const {parseBrief, planFirstCut, assembleFirstCut, proxyGenerate} = await import('/firstcut.js');
-  const {proposeReplacement, geminiGenerate} = await import('/replace.js');
+  const {proposeReplacement, prepareReplacement, stageReplacement, geminiGenerate} = await import('/replace.js');
   const gates = {};
   function check(name, condition, detail) {
     gates[name] = Boolean(condition);
@@ -71,8 +72,47 @@ async function browserScenario({item, transcript, proxy}) {
   const replaced = final.sequence.video[0].items[0];
   check('clipNowPlaysTake', replaced.item === r.take.sourceItemId && replaced.sourceIn <= r.take.sourceIn && replaced.sourceIn + replaced.duration >= r.take.sourceOut, {replaced, take: r.take});
 
+  // TRIBE path with a REPLAYED sample event (hand-made, not TRIBE output): gate → clip under the range →
+  // decider → suggestion-only preview, which is rejected so the export below keeps the accepted cut.
+  const {createTribeGate, clipAt, tribeCorrection, createProposals} = await import('/demo.mjs');
+  const line2 = final.sequence.video[0].items[1];
+  const event = {version: 1, id: 'replayed-1', kind: 'below-reference', sequence: final.sequence.id, revision: final.project.revision,
+    renderId: 'replayed-sample', range: {start: line2.start, end: line2.start + line2.duration}, score: 0.5, reference: 'replayed', model: 'replayed-sample'};
+  const tribeGate = createTribeGate();
+  const now = {sequence: final.sequence.id, revision: final.project.revision, pending: false, active: false};
+  check('tribeStaleDropped', tribeGate.check({...event, revision: event.revision - 1}, now).drop === 'stale');
+  const g = tribeGate.check(event, now);
+  check('tribeAccepted', g.event && clipAt(final.sequence, g.event.range) === line2.clip, g);
+  check('tribeDuplicateDropped', tribeGate.check({...event, id: 'replayed-2'}, now).drop === 'duplicate');
+  started = performance.now();
+  const ask = {transcript: tribeCorrection(g.event, brief.feeling), takes, adapter, context: {revision: event.revision, sequence: event.sequence, selection: [line2.clip]}};
+  const t = await proposeReplacement({...ask, generate: geminiGenerate(proxy)}); // live decider: may rightly decline
+  const tribeMs = performance.now() - started;
+  if (t.status === 'preview') await adapter.cancel(t.token);
+  // Fixed decider by candidate id (the Jev path) so the suggestion branch always runs in the engine.
+  const prepared = await prepareReplacement(ask);
+  const pick = prepared.candidates?.find(c => !c.current && !/\b(uh|um)\b/i.test(c.words));
+  const fixed = await stageReplacement(prepared, pick?.id ?? '', 'fixed test decider', adapter);
+  check('tribeIdStaged', fixed.status === 'preview', fixed);
+  const bar = createProposals(adapter, () => {});
+  await bar.show({...fixed, source: 'tribe'});
+  check('tribeSuggestionPending', bar.pending?.source === 'tribe', bar.pending);
+  let refused = false; // the engine holds one preview at a time, so the page rejects before staging creator input
+  try {await stageReplacement(prepared, pick.id, 'creator', adapter);} catch {refused = true;}
+  check('enginePreviewExclusive', refused);
+  await bar.reject();
+  const mine = await stageReplacement(prepared, pick.id, 'creator', adapter);
+  await bar.show(mine);
+  check('creatorReplacesSuggestion', bar.pending?.source === 'creator' && bar.pending.token === mine.token, bar.pending);
+  check('tribeNeverCommits', (await filmcraft.execute('history.list')).undo.length === finalHistory.length);
+  if (bar.pending) await bar.reject();
+  const afterTribe = await adapter.inspect();
+  check('tribeRejectRestores', JSON.stringify(timeline(afterTribe.sequence)) === JSON.stringify(timeline(final.sequence)));
+  const tribe = {event, live: {outcome: t.status, to: t.status === 'preview' ? text(t.take) : null, message: t.message ?? t.explanation, ms: tribeMs},
+    fixed: {candidates: prepared.candidates.map(c => [c.id, c.words, c.current]), picked: pick.id}};
+
   return {ok: true, gates, planMs, replaceMs, takes: takes.map(t => ({statementIndex: t.statementIndex, text: text(t), score: t.score})),
     firstCut: plan.choices.map(c => ({statementIndex: c.statementIndex, take: text(c.take), reason: c.reason})),
     replacement: {correction, from: text(r.from), to: text(r.take), explanation: r.explanation, label: r.label},
-    expectedSpeech: [text(r.take), text(plan.choices[1].take)], history: finalHistory};
+    tribe, expectedSpeech: [text(r.take), text(plan.choices[1].take)], history: finalHistory};
 }
