@@ -22,8 +22,23 @@ October 10, 2026: `node --test shway/*.test.ts` (22 tests; 36 guard mutations ea
 `foundation.mjs --transcripts --proposals` in Chrome against the generated 3 s fixture and a same-day
 wasm build reused from a parallel lane (DEV-88 changes no Rust) (all 21 gates,
 including exact sequence ticks, one undo step, `transcript.search`, three takes per statement, and
-undo). Still planned: choosing a transcription provider/worker, real creator speech, linked audio
-and multi-source sync in takes, and persisting the take index.
+undo). Still planned: real creator speech, linked audio and multi-source sync in takes, and
+persisting the take index.
+
+**Status (DEV-88, local transcription):** the provider is FilmCraft's built-in Whisper. It runs
+headlessly through `filmcraft-cli`, built with `--features whisper`, via
+[`shway/transcribe-local.mjs`](../../shway/transcribe-local.mjs). The weights are whisper-base
+(293 MB), MIT/Apache-2.0, downloaded once and never committed. It runs on the CPU, not the GPU
+worker. Verified on October 10, 2026, on an Apple M2 with a 5.37 s `say` fixture:
+
+- all 16 words were correct, with monotonic tick times from 0.05 s to 5.34 s;
+- a run took 4.8 s;
+- `parseTranscript` accepted the output;
+- `indexTakes` scored all three script lines at 1.00.
+
+Commands and limits are in the [Shway README](../../shway/README.md). Not yet verified: creator
+footage, noisy audio, long clips, and timing accuracy against a hand-labelled reference. The
+browser build has no speech, so transcripts are made offline and imported with `transcript.set`.
 
 ## First-cut take choice
 

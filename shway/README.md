@@ -234,3 +234,34 @@ Evidence (2026-10-10):
   - Replacement items with source marks.
   - Projects with sync-locked tracks. The demo project's A2 sync lock refused a replacement in
     the demo agent's run.
+
+## Local word-timed transcripts (DEV-88)
+
+`shway/transcribe-local.mjs` runs FilmCraft's built-in Whisper (pure Rust, candle, CPU) headlessly
+and writes a `TranscriptInput` (`timeUnit: "ticks"`) for `parseTranscript` /
+`adapter.importTranscript`. No paid provider, no network after the one-off model download. Node ≥ 22.
+
+```sh
+cargo build --release -p filmcraft-cli --features whisper      # speech is off in default builds
+node shway/transcribe-local.mjs clip.mp4 --download --out clip.transcript.json   # first run only: --download
+node shway/transcribe-local.mjs clip.mp4 --source-item 41 --language en --out clip.transcript.json
+node --test shway/transcribe-local.test.mjs
+```
+
+- **Flow:** `filmcraft-cli import` into a throwaway project, `exec transcript.generate`, then the
+  engine's stored transcript (`project.transcripts[id]`, media-time ticks) is exported as is.
+  Blank words are dropped; malformed or overlapping bounds fail the run instead of being guessed.
+- **`--source-item`:** the item id in the project the transcript will be imported into (default:
+  the throwaway project's id, which is 1). **`--model`:** `whisper-tiny` | `whisper-base` (default) |
+  `whisper-small`. **`--language`:** `auto` (default) or an ISO code. **`--cli`:** default
+  `target/release/filmcraft-cli`.
+- **Model:** `--download` runs `transcript.downloadModel`: pinned OpenAI Hugging Face revisions,
+  SHA-256 checked, into `$FILMCRAFT_DATA_DIR` or `~/Library/Application Support/FilmCraft/models`.
+  whisper-base is 293 MB (tiny 154 MB, small 969 MB). Licence: MIT (OpenAI weights), HF conversion
+  Apache-2.0. Never commit weights.
+- **Verified 2026-10-10 (Apple M2):** `say` speech, 5.37 s, as mp4 and wav fixtures made by ffmpeg.
+  All 16 words were correct, with monotonic times from 0.05 s to 5.34 s. The ffprobe duration is
+  5.375 s. The first run took 20 s, including the download. Later runs took 4.8 s wall, including
+  the model load. `parseTranscript` accepted the output. `indexTakes` found all three script lines
+  at score 1.00. The built-in recogniser sets no confidence (every word gets 1), so do not rank takes on
+  confidence. Real creator footage, noisy audio and clips over 30 s are not yet verified.
