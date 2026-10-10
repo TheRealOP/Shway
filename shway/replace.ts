@@ -84,8 +84,22 @@ function slip(clip: number, source: number, d: number, a: number, e: number): Tr
   return e > 0 ? [...trim("out", e - d), ...trim("in", a)] : [...trim("in", a), ...trim("out", e - d)];
 }
 
-export async function proposeReplacement(input: ReplacementInput): Promise<ReplacementResult> {
-  const {utterance, takes, generate, adapter} = input;
+/** One permitted take, grounded in the take index. `id` is opaque to models; times stay here. */
+export interface ReplacementCandidate {id: string; take: Take; words: string; current: boolean}
+/**
+ * Everything a decider may choose from, bound to the push-to-talk snapshot. A decider (Gemini today,
+ * Jev in DEV-104) answers with one candidate `id`, or "no-change" / "review"; stageReplacement
+ * refuses anything else. Staging uses `context.revision`, so a decision made on stale state fails.
+ */
+export interface PreparedReplacement {
+  status: "candidates"; correction: string; context: ReplacementContext; clip: ClipInspection;
+  sequence: SequenceInspection; from: Take; candidates: ReplacementCandidate[];
+}
+export const NO_CHANGE = "no-change", REVIEW = "review";
+
+/** Resolve target and candidates without any model call. */
+export async function prepareReplacement(input: Omit<ReplacementInput, "generate">): Promise<PreparedReplacement | Exclude<ReplacementResult, {status: "preview"}>> {
+  const {utterance, takes, adapter} = input;
   const text = (input.transcript ?? utterance?.transcript?.text ?? "").trim();
   if (!text || text.length > MAX_TRANSCRIPT) return {status: "rejected", message: "No usable transcript for this utterance."};
   const context = readContext(input.context ?? utterance?.context);
@@ -98,20 +112,22 @@ export async function proposeReplacement(input: ReplacementInput): Promise<Repla
   if (typeof clip === "string") return {status: "need-selection", message: clip};
   const from = currentTake(takes, clip);
   if (!from) return {status: "no-take", message: "The selected clip does not match any indexed take."};
-  const candidates = takes.filter(t => t.statementIndex === from.statementIndex);
-  const current = candidates.indexOf(from);
-  if (candidates.length < 2) return {status: "no-take", message: "There is no other take of this line."};
+  const same = takes.filter(t => t.statementIndex === from.statementIndex);
+  if (same.length < 2) return {status: "no-take", message: "There is no other take of this line."};
+  const candidates = same.map((take, i) => ({id: `take-${i}`, take, words: words(take), current: take === from}));
+  return {status: "candidates", correction: text, context, clip, sequence, from, candidates};
+}
 
-  // Takes go to the model as opaque indices with their words; never IDs or times.
-  const prompt = `Spoken correction: ${JSON.stringify(text)}\n\nTakes of the selected line:\n` +
-    candidates.map((t, i) => `${i}${i === current ? " (current)" : ""}: ${JSON.stringify(words(t))}`).join("\n");
-  const answer = await generate({prompt, system: SYSTEM, schema: SCHEMA}) as {take?: unknown; explanation?: unknown} | null;
-  const choice = answer?.take;
-  const explanation = typeof answer?.explanation === "string" ? answer.explanation.trim().slice(0, 300) : "";
-  if (choice === -1) return {status: "rejected", message: explanation || "No take matches that correction."};
-  if (!safe(choice) || choice >= candidates.length) return {status: "rejected", message: "The model chose a take that does not exist; nothing was changed."};
-  if (choice === current) return {status: "rejected", message: "The model chose the take already in the timeline; nothing was changed."};
-  const take = candidates[choice];
+/** Stage the chosen candidate as a validated proposal. Never stages a choice that was not offered. */
+export async function stageReplacement(prepared: PreparedReplacement, choice: string, explanation: string,
+  adapter: Pick<ShwayAdapter, "preview" | "cancel">): Promise<ReplacementResult> {
+  const {context, clip, sequence, from} = prepared;
+  if (choice === NO_CHANGE) return {status: "rejected", message: explanation || "No take matches that correction."};
+  if (choice === REVIEW) return {status: "rejected", message: explanation || "This correction needs your review; nothing was changed."};
+  const chosen = prepared.candidates.find(c => c.id === choice);
+  if (!chosen) return {status: "rejected", message: "The model chose a take that does not exist; nothing was changed."};
+  if (chosen.current) return {status: "rejected", message: "The model chose the take already in the timeline; nothing was changed."};
+  const take = chosen.take;
 
   const rate = (sequence.settings as {frame_rate?: {num?: unknown; den?: unknown}} | undefined)?.frame_rate;
   const frame = safe(rate?.num, 1) && safe(rate?.den, 1) ? TICKS_PER_SECOND * rate.den / rate.num : NaN;
@@ -138,6 +154,21 @@ export async function proposeReplacement(input: ReplacementInput): Promise<Repla
     return {status: "rejected", message: "The engine staged a different source range than the chosen take; nothing was changed."};
   }
   return {status: "preview", token: preview.token, label: preview.label, preview, explanation, from, take, proposal};
+}
+
+/** Gemini as the decider: prepare, pick one offered take by number, stage. */
+export async function proposeReplacement(input: ReplacementInput): Promise<ReplacementResult> {
+  const prepared = await prepareReplacement(input);
+  if (prepared.status !== "candidates") return prepared;
+  const {candidates} = prepared;
+  // Takes go to the model as opaque indices with their words; never IDs or times.
+  const prompt = `Spoken correction: ${JSON.stringify(prepared.correction)}\n\nTakes of the selected line:\n` +
+    candidates.map((c, i) => `${i}${c.current ? " (current)" : ""}: ${JSON.stringify(c.words)}`).join("\n");
+  const answer = await input.generate({prompt, system: SYSTEM, schema: SCHEMA}) as {take?: unknown; explanation?: unknown} | null;
+  const n = answer?.take;
+  const explanation = typeof answer?.explanation === "string" ? answer.explanation.trim().slice(0, 300) : "";
+  const choice = n === -1 ? NO_CHANGE : safe(n) && n < candidates.length ? candidates[n].id : "";
+  return stageReplacement(prepared, choice, explanation, input.adapter);
 }
 
 /** A Generate backed by the local Gemini proxy (shway/gemini-server.mjs). */

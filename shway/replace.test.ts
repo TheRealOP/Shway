@@ -1,7 +1,7 @@
 // Take replacement from a spoken correction, with fake model and adapter. Run: node --test shway/*.test.ts
 import test from "node:test";
 import assert from "node:assert/strict";
-import {proposeReplacement} from "./replace.ts";
+import {prepareReplacement, proposeReplacement, stageReplacement} from "./replace.ts";
 import type {ReplacementInput} from "./replace.ts";
 import {AdapterError} from "./adapter.ts";
 import type {EditProposal, SequenceInspection} from "./adapter.ts";
@@ -166,4 +166,23 @@ test("a preview staging another item or range is cancelled", async () => {
     assert.equal(r.status, "rejected", JSON.stringify(patch));
     assert.deepEqual(f.calls, ["inspect", "generate", "preview", "cancel"]);
   }
+});
+
+test("decider contract: grounded candidates without a model call; only offered ids stage", async () => {
+  const f = fixture();
+  const p = await prepareReplacement(f.input());
+  assert.equal(p.status, "candidates");
+  if (p.status !== "candidates") return;
+  assert.deepEqual(p.candidates.map(c => [c.id, c.words, c.current]), [
+    ["take-0", "Welcome to the workshop.", true], ["take-1", "Welcome to the [laughs] workshop.", false], ["take-2", "Welcome to our workshop.", false]]);
+  assert.deepEqual(f.calls, ["inspect"]);
+  const {adapter} = f.input();
+  for (const choice of ["review", "no-change", "take-0", "take-9", "take-1 ", ""]) {
+    assert.equal((await stageReplacement(p, choice, "", adapter)).status, "rejected", choice);
+  }
+  assert.deepEqual(f.calls, ["inspect"]);
+  const r = await stageReplacement(p, "take-1", "Jev picked the laugh.", adapter);
+  assert.equal(r.status, "preview");
+  assert.deepEqual(f.calls, ["inspect", "preview"]);
+  assert.equal(f.proposal()?.expectedRevision, 4); // bound to the push-to-talk snapshot
 });
