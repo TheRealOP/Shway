@@ -53,3 +53,25 @@ node apps/filmcraft-web/tests/foundation.mjs --url http://127.0.0.1:8765/ --medi
 
 See [foundation evidence](../docs/wiki/foundation-evidence.md) and the
 [architecture contract](../docs/wiki/architecture.md). Never commit fixtures or generated output.
+
+## Gemini proxy (creative reasoning)
+
+`shway/gemini-server.mjs` is a local proxy, so the API key never reaches a web page. Node ≥ 22, no
+packages.
+
+```sh
+node shway/gemini-server.mjs --port 8790      # reads GEMINI_API_KEY (optional GEMINI_MODEL) from <main checkout>/.env
+```
+
+- **Key file:** the `.env` lives beside the main checkout (found through `git rev-parse --git-common-dir`),
+  so every worktree uses one file. `SHWAY_ENV=/path/.env` overrides it. `.env` is excluded from git.
+- **`POST /generate`:** body `{prompt, system?, schema?, model?}`. It returns `{model, usage, text}`,
+  or `{model, usage, json}` when you pass a `schema`. A `schema` is a Gemini `responseSchema`
+  (OpenAPI subset: `OBJECT`, `STRING`, …).
+- **`GET /health`:** returns `{ok, model}`.
+- **Default model:** `gemini-3.8-flash`. It calls `models/{model}:generateContent` with the key in the
+  `x-goog-api-key` header.
+- **Safety:** only pages served from this machine (localhost, 127.0.0.1, [::1]) may call it. Bodies over
+  2 MB are refused. Upstream errors never echo the key.
+- **Verified 2026-10-10:** 9 tests against a fake upstream. One live structured call with the real key:
+  a three-take choice returned `{take, reason}` JSON.
