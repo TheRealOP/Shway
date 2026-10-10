@@ -31,7 +31,7 @@ and multi-source sync in takes, and persisting the take index.
 validates an editable StoryBrief and asks the model, through the local Gemini proxy, to choose one
 indexed take per script statement by opaque number. Output is checked strictly (one valid,
 statement-matching take per statement, no extra fields, one retry with the error) and every range
-time comes from the take index. Verified October 10, 2026: 22 `firstcut.test.ts` tests (fake model:
+time comes from the take index. Verified October 10, 2026: 23 `firstcut.test.ts` tests (fake model:
 happy path, invented/wrong-statement/duplicate/missing choices, non-JSON, retry outcomes, hostile
 briefs and takes; 15 of 16 guard mutations fail a test, the survivor is a defensive rethrow), and one
 live `gemini-3.8-flash` call on the synthetic three-take fixture that returned
