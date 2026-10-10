@@ -288,3 +288,13 @@ node --test shway/transcribe-local.test.mjs
   the model load. `parseTranscript` accepted the output. `indexTakes` found all three script lines
   at score 1.00. The built-in recogniser sets no confidence (every word gets 1), so do not rank takes on
   confidence. Real creator footage, noisy audio and clips over 30 s are not yet verified.
+
+## Long-form first cut from many clips (`longform.mjs`)
+
+`node shway/longform.mjs segments|plan|assemble|compare|test` (usage in the file header). Splits
+`transcribe-local.mjs` transcripts into word-exact segments at pauses, asks Gemini (local proxy,
+segment numbers + text + one-line clip descriptions, never times) for a hook/intro/body/ending
+playlist, validates it (numbers exist, no duplicates, 500–1600 spoken words; one retry quoting the
+error), widens ranges to whole frames with `alignRange`, and places them with `proposal.preview` →
+`proposal.commit`. The engine caps a proposal at 32 ranges, so a longer cut commits as several
+labelled proposals. Needs a CLI built from this tree (`proposal` `timeline.place` steps).
