@@ -301,8 +301,6 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let body = |s: &str| RichText::new(s).size(BODY).line_height(Some(LINE));
     ui.spacing_mut().item_spacing.y = GAP;
     ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-        // keys hint (bottom)
-        ui.label(RichText::new(tl!("Enter to send · Shift+Enter for a new line")).small().color(weak));
         // composer: an input that grows to six lines, with the send button inside
         let can_send = !st.waiting && !st.draft.trim().is_empty();
         egui::Frame::new()
@@ -422,12 +420,6 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         let r = egui::Frame::new().fill(fill).corner_radius(bubble_radius(user)).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
                             ui.set_max_width(max_w);
                             ui.add(egui::Label::new(body(&m.text).color(text)).wrap().selectable(true))
-                        });
-                        r.inner.context_menu(|ui| {
-                            if ui.button(tl!("Copy")).clicked() {
-                                ui.ctx().copy_text(m.text.clone());
-                                ui.close();
-                            }
                         });
                         elems.push((format!("assistant.message.{i}"), r.response.rect, m.role.clone()));
                     });
