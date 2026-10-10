@@ -2640,6 +2640,18 @@ fn build() -> Vec<CommandSpec> {
             ))
         }),
         query!("project.inspect", "Inspect Project", "{}", |s, _| Ok(crate::commands::inspect_project(s))),
+        query!(
+            "proposal.preview",
+            "Preview Edit Proposal",
+            r#"{"expectedRevision":u64,"sequence":id,"label":str,"steps":[{"command":"timeline.trim"|"clip.replaceFromBin","params":typed}]}; max 16; trim requires clip/source/edge/mode/deltaFrames; replace requires clips/item/keepSourceIn?"#,
+            crate::proposals::preview
+        ),
+        query!("proposal.inspect", "Inspect Edit Proposal", r#"{"token":id}"#, |s, p| crate::proposals::inspect(s, p)),
+        query!("proposal.render", "Render Edit Proposal", r#"{"token":id,"frame":i64,"maxSide":u32=256}; RGBA8 pixels; maxSide <= 256"#, |s, p| {
+            crate::proposals::render(s, p)
+        }),
+        cmd!("proposal.commit", "Commit Edit Proposal", [], None, r#"{"token":id}"#, always, crate::proposals::commit),
+        query!("proposal.cancel", "Cancel Edit Proposal", r#"{"token":id}"#, crate::proposals::cancel),
         query!("sequence.inspect", "Inspect Sequence", r#"{"item":id?}"#, |s, p| {
             let id = item_p(p, "item").or(s.state.active_sequence).ok_or(EngineError::NoSequence)?;
             let q = s.project.sequence(id).ok_or(EngineError::NoSequence)?;

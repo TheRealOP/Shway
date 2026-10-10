@@ -4,6 +4,9 @@ Solo build, submission Sunday morning October 11, 2026; exact cutoff unknown.
 Budget **20–35 focused hours** for the core demo assuming the fork works with the chosen media.
 This is an estimate, not a guarantee. Reserve at least the last three hours for delivery.
 
+Current evidence: the browser synthetic foundation workflow passes; actual creator-media checks
+remain open. See [foundation evidence](foundation-evidence.md).
+
 ## Core gates
 
 | Gate | Estimate | Tickets | Exit condition |

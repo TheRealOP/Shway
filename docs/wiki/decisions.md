@@ -7,7 +7,7 @@ Snapshot: October 10, 2026. Update these entries when evidence or user direction
 | Fork Filmcraft | Selected | Reuse Rust editor; baseline 7bd76212629a067a9d1c5426d751de9faf4664b7; fork exists |
 | AI first cut + creator-directed revisions | Selected | Matches the creator's recording-to-edit workflow |
 | Camera hands + voice | Selected | Available input; twist scrubs and swipes navigate |
-| Browser surface first | Provisional | Must pass import/play/edit/undo/export; native + bridge fallback |
+| Browser surface first | Viable on synthetic fixture | WebGPU import/play/edit/undo/save/reopen/H.264+AAC export passes locally; warmed synthetic playback measured 23.72 displayed frames/s; actual footage still needs verification |
 | Separate GPU inference worker | Planned | Keeps TRIBE/transcription off the live editor path |
 | Hosted multimodal reasoning | Planned | Shortest initial path; provider and model still open |
 | Bounded profile adaptation | Planned | Explicit, testable personalization without autonomous rewrites |
@@ -26,7 +26,8 @@ Snapshot: October 10, 2026. Update these entries when evidence or user direction
 
 ## Evidence log
 
-Only the fork and planning backlog are confirmed here.
+The browser foundation workflow is verified on a synthetic fixture; see
+[foundation evidence](foundation-evidence.md) for exact scope and reproduction.
 Record future results as: date, commit, hardware/fixture, action, outcome, and limitations.
 Do not rewrite an upstream marketing claim as a locally verified result.
 
