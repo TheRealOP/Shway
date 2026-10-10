@@ -339,7 +339,8 @@ fn apply(s: &mut Session, step: Step) -> Result<Value> {
                 // Append after every track's content: overwrite then never touches existing clips.
                 let at = s.active_sequence().ok_or(EngineError::NoSequence)?.duration();
                 tick(at.0.checked_add(duration).ok_or_else(|| bad("sequence range overflow"))?)?;
-                let mut params = json!({"item":r.item,"track":"V1","time":at.0,"sourceIn":start.0,"duration":duration,"insert":false,"video":true,"audio":audio});
+                let mut params =
+                    json!({"item":r.item,"track":"V1","time":at.0,"sourceIn":start.0,"duration":duration,"insert":false,"video":true,"audio":audio});
                 if audio {
                     params["audioTrack"] = json!("A1");
                 }
