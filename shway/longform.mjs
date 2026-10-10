@@ -3,7 +3,7 @@
 // through the local proxy (segment numbers + text only, never times) and assembled in the engine
 // as one proposal.preview → proposal.commit. Node ≥ 23 (imports adapter.ts for alignRange).
 //
-//   node shway/longform.mjs segments <tx-dir> <segments.json>
+//   node shway/longform.mjs segments <tx-dir> <segments.json> [--media <clip dir>]   (numbered in recording order)
 //   node shway/longform.mjs plan <segments.json> <clips.json> <plan.json> [--url http://127.0.0.1:8792]
 //   node shway/longform.mjs assemble <segments.json> <plan.json> <media-dir> <out.fcproj> <cut.json> [--cli path]
 //   node shway/longform.mjs compare <cut.json> <export-transcript.json>
@@ -35,17 +35,35 @@ export function segment(clip, words) {
   return out;
 }
 
-/** Every number exists, appears once, total words in budget; returns an error string or null. */
+/**
+ * When the camera recorded a clip: Sony's <clip>M01.XML sidecar CreationDate, in ms; null if absent.
+ * Segments are numbered in this order, so segment numbers ARE the chronology.
+ */
+export function recordedAt(mediaDir, clip) {
+  try {
+    const m = /CreationDate value="([^"]+)"/.exec(readFileSync(join(mediaDir, `${clip}M01.XML`), "utf8"));
+    const t = m ? Date.parse(m[1]) : NaN;
+    return Number.isFinite(t) ? t : null;
+  } catch { return null; }
+}
+/** Clips by recording time; clips without a time keep file-name order after the timed ones. */
+export function chronological(clips, timeOf) {
+  return [...clips].sort((a, b) => (timeOf(a) ?? Infinity) - (timeOf(b) ?? Infinity) || a.localeCompare(b));
+}
+
+/** Every number exists, appears once, in increasing (recording) order, total words in budget; an error string or null. */
 export function validatePlan(plan, segments, words = [500, 1600]) {
   const count = segments.length;
   if (!plan || typeof plan.title !== "string" || !plan.title.trim() || !Array.isArray(plan.sections) || !plan.sections.length) return "need a title and a non-empty sections array";
   const seen = new Set();
+  let prev = 0;
   for (const s of plan.sections) {
     if (!s || typeof s.name !== "string" || !Array.isArray(s.segments) || !s.segments.length) return "every section needs a name and at least one segment";
     for (const x of s.segments) {
       if (!Number.isInteger(x?.n) || x.n < 1 || x.n > count) return `segment ${JSON.stringify(x?.n)} does not exist (valid: 1–${count})`;
       if (seen.has(x.n)) return `segment ${x.n} is used twice`;
-      seen.add(x.n);
+      if (x.n < prev) return `segment ${x.n} comes after ${prev}; the video must follow recording order (increasing numbers)`;
+      seen.add(x.n); prev = x.n;
     }
   }
   const total = [...seen].reduce((n, i) => n + wordCount(segments[i - 1].text), 0);
@@ -56,7 +74,8 @@ const wordCount = (t) => t.split(/\s+/).filter(Boolean).length;
 
 /** Playlist → source ranges: pad into the surrounding silence, merge consecutive numbers. */
 export function toRanges(plan, segments) {
-  const list = plan.sections.flatMap((s) => s.segments.map((x) => ({ ...x, section: s.name })));
+  // Recording order is enforced here, whatever order the plan listed: numbers are chronological.
+  const list = plan.sections.flatMap((s) => s.segments.map((x) => ({ ...x, section: s.name }))).sort((a, b) => a.n - b.n);
   const ranges = [];
   for (const x of list) {
     const seg = segments[x.n - 1], prev = segments[x.n - 2], next = segments[x.n];
@@ -72,12 +91,13 @@ async function plan(segFile, clipsFile, outFile, url) {
   const segments = readJson(segFile), clips = readJson(clipsFile);
   const system = "You are a YouTube editor. You only choose from numbered transcript segments; you never invent numbers.";
   const prompt = [
-    "Footage: a vlog of a group of friends at the ShellHacks hackathon (Miami), filmed by one of them, in recording order.",
+    "Footage: a vlog of a group of friends at the ShellHacks hackathon (Miami), filmed by one of them.",
+    "Segments are numbered in the order they were recorded, and the video plays them strictly in that order.",
     "Clip descriptions:", ...Object.entries(clips).map(([c, d]) => `${c}: ${d}`),
     "", "Numbered transcript segments (automatic Whisper transcript, may contain errors):",
     ...segments.map((s, i) => `[${i + 1}] (${s.clip}, ${wordCount(s.text)}w) ${s.text}`),
-    "", "Build a horizontal long-form YouTube video with a clear story: a cold-open hook (a strong moment from anywhere), an intro, body sections that follow the weekend in order, and an ending.",
-    "List segments in playback order. Prefer runs of consecutive numbers so lines are not chopped mid-thought; skip filler, mumbling and unintelligible lines.",
+    "", "Build a horizontal long-form YouTube video that tells the weekend as it happened: choose which segments to keep and group them into chronological sections (start, build, setbacks, finish).",
+    "List segment numbers in increasing order only; never move a later moment earlier. Prefer runs of consecutive numbers so lines are not chopped mid-thought; skip filler, mumbling and unintelligible lines.",
     "Let the content decide the length within 600–1500 spoken words in total (about 4–10 minutes); add up the word counts shown as (Nw). Give a short reason per segment, a working title, and a one-sentence explanation of the chosen length.",
   ].join("\n");
   const schema = {
@@ -99,7 +119,7 @@ async function plan(segFile, clipsFile, outFile, url) {
   let result = await ask(prompt), error = validatePlan(result, segments), attempts = 1;
   if (error) {
     process.stderr.write(`plan invalid (${error}); retrying once\n`);
-    result = await ask(`${prompt}\n\nYour previous answer was rejected: ${error}. Answer again using only existing segment numbers, each at most once, within the word budget.`);
+    result = await ask(`${prompt}\n\nYour previous answer was rejected: ${error}. Answer again using only existing segment numbers, each at most once, in increasing order, within the word budget.`);
     error = validatePlan(result, segments);
     attempts = 2;
   }
@@ -177,8 +197,11 @@ function selfTest() {
   if (validatePlan({ title: "t", sections: [{ name: "x", segments: [{ n: 1 }, { n: 1 }] }] }, segs, [0, 9]) !== "segment 1 is used twice") throw new Error("dup");
   if (!validatePlan({ title: "t", sections: [{ name: "x", segments: [{ n: 4 }] }] }, segs, [0, 9])?.includes("does not exist")) throw new Error("range");
   if (!validatePlan({ title: "t", sections: [{ name: "x", segments: [{ n: 1 }] }] }, segs, [3, 9])?.includes("2 spoken words")) throw new Error("budget");
-  const r = toRanges({ sections: [{ name: "x", segments: [{ n: 3 }, { n: 1 }, { n: 2 }] }] }, segs);
-  if (r.length !== 2 || r[1].segs.length !== 2 || r[1].sourceOut !== segs[1].end + PAD_OUT || r[1].sourceIn !== 0) throw new Error("ranges");
+  if (!validatePlan({ title: "t", sections: [{ name: "x", segments: [{ n: 3 }] }, { name: "y", segments: [{ n: 1 }] }] }, segs, [0, 9])?.includes("recording order")) throw new Error("order");
+  const r = toRanges({ sections: [{ name: "x", segments: [{ n: 3 }, { n: 1 }, { n: 2 }] }] }, segs); // listed out of order: placed chronologically
+  if (r.length !== 1 || r[0].segs.map((x) => x.n).join() !== "1,2,3" || r[0].sourceIn !== 0 || r[0].sourceOut !== segs[2].end + PAD_OUT) throw new Error("ranges");
+  const t = { B: 2, A: 3, C: null, D: 1 };
+  if (chronological(["A", "B", "C", "D"], (c) => t[c]).join("") !== "DBAC") throw new Error("chronological");
   if (overlap("the cat sat", "a cat sat down") !== 2 / 3) throw new Error("overlap");
   console.log("self-test ok");
 }
@@ -188,9 +211,12 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const opt = (k, d) => { const i = a.indexOf(k); return i >= 0 ? a.splice(i, 2)[1] : d; };
   try {
     if (cmd === "segments") {
-      const segs = readdirSync(a[0]).filter((f) => /^C\d+\.json$/.test(f)).sort().flatMap((f) => segment(basename(f, ".json"), readJson(join(a[0], f)).words));
+      const media = opt("--media", null);
+      const time = (c) => (media ? recordedAt(media, c) : null);
+      const clips = chronological(readdirSync(a[0]).filter((f) => /^C\d+\.json$/.test(f)).map((f) => basename(f, ".json")), time);
+      const segs = clips.flatMap((c) => segment(c, readJson(join(a[0], `${c}.json`)).words).map((s) => ({ ...s, recordedAt: time(c) == null ? null : new Date(time(c)).toISOString() })));
       writeFileSync(a[1], JSON.stringify(segs, null, 1));
-      process.stderr.write(`${segs.length} segments\n`);
+      process.stderr.write(`${segs.length} segments from ${clips.length} clips (${clips.filter((c) => time(c) != null).length} with recording times)\n`);
     } else if (cmd === "plan") { const url = opt("--url", "http://127.0.0.1:8792"); await plan(a[0], a[1], a[2], url); }
     else if (cmd === "assemble") { const cli = opt("--cli", "target/release/filmcraft-cli"); assemble(a[0], a[1], a[2], a[3], a[4], resolve(cli)); }
     else if (cmd === "compare") compare(a[0], a[1]);
