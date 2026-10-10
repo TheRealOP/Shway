@@ -35,6 +35,7 @@ pub mod previews;
 pub mod project_manager;
 pub mod project_panel;
 pub mod project_tools;
+pub mod proposals;
 pub mod proxies;
 pub mod relink;
 pub mod remix;
@@ -377,6 +378,9 @@ pub struct Session {
     pub browser: media_browser::BrowserState,
     /// Nesting depth of [`Session::execute`] (commands that run other commands).
     exec_depth: u32,
+    /// At most one bounded, unpublished edit proposal. Never persisted or exported implicitly.
+    pub(crate) proposal: Option<proposals::Prepared>,
+    pub(crate) next_proposal: u64,
 }
 
 /// An export advanced a batch at a time on the host's thread ([`Session::pump_jobs`]).
@@ -464,6 +468,8 @@ impl Session {
             log: Default::default(),
             browser: Default::default(),
             exec_depth: 0,
+            proposal: None,
+            next_proposal: 1,
         }
     }
 
@@ -616,7 +622,7 @@ impl Session {
     /// Run a command by id.
     pub fn execute(&mut self, id: &str, params: Value) -> Result<Value> {
         let spec = commands::find(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
-        if self.exec_depth == 0 && spec.journal && self.trim_play.active() {
+        if self.exec_depth == 0 && spec.journal && self.trim_play.active() && !id.starts_with("proposal.") {
             self.settle_trim_playback(id);
         }
         if let Err(why) = self.enabled_for(spec, &params) {
