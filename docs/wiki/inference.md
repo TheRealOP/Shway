@@ -15,6 +15,16 @@ Import through Filmcraft's documented transcript.set command; verify behavior wi
 Built-in Whisper is optional and unavailable in the browser build.
 Prefer the separate GPU for transcription when feasible; a hosted API is a fallback.
 
+**Status (DEV-88, import/indexing only):** the provider-neutral transcript format, tick conversion,
+`importTranscript` via `transcript.set`, and the script-to-take index are implemented in
+[`shway/takes.ts`](../../shway/takes.ts) and the [adapter](../../shway/README.md). Verified on
+October 10, 2026: `node --test shway/*.test.ts` (22 tests; 36 guard mutations each fail a test) and
+`foundation.mjs --transcripts --proposals` in Chrome against the generated 3 s fixture and a same-day
+wasm build reused from a parallel lane (DEV-88 changes no Rust) (all 21 gates,
+including exact sequence ticks, one undo step, `transcript.search`, three takes per statement, and
+undo). Still planned: choosing a transcription provider/worker, real creator speech, linked audio
+and multi-source sync in takes, and persisting the take index.
+
 ## TRIBE flow
 
 1. Render the actual version, including accepted cuts, effects, and sound.

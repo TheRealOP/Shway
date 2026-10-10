@@ -1,5 +1,7 @@
 // Thin browser boundary over FilmCraft's authoritative Rust project and proposal commands.
 // Edit times cross this boundary only as safe integer ticks or integer frame deltas.
+import {parseTranscript, TranscriptError} from "./takes.ts";
+import type {SourceTranscript, TranscriptInput} from "./takes.ts";
 export interface FilmcraftTransport {
   commands(): Promise<unknown>;
   execute(command: string, params?: Record<string, unknown>): Promise<unknown>;
@@ -153,6 +155,19 @@ function proposalInput(value: EditProposal): EditProposal {
   return {expectedRevision, sequence, label: checkedLabel, steps};
 }
 
+// Find a media item's type and duration in project.inspect's bin tree (bounded walk).
+function binItem(root: unknown, item: number): {type: unknown; duration: unknown} | null {
+  const stack: unknown[] = [root];
+  for (let visited = 0; stack.length && visited < 100_000; visited++) {
+    const node = stack.pop();
+    if (!node || typeof node !== "object") continue;
+    const entry = node as Record<string, unknown>;
+    if (entry.item === item) return {type: entry.type, duration: entry.duration};
+    if (Array.isArray(entry.children)) stack.push(...entry.children.slice(0, 100_000));
+  }
+  return null;
+}
+
 export class ShwayAdapter {
   #transport: FilmcraftTransport;
   #capabilities: Set<string>;
@@ -276,6 +291,30 @@ export class ShwayAdapter {
       if (width > maxSide || height > maxSide || !Array.isArray(result.rgba) || result.rgba.length !== width * height * 4 || Array.from(result.rgba).some(value => typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 255)) throw new AdapterError("response", "Invalid preview pixel buffer");
       return {width, height, rgba: Uint8Array.from(result.rgba)};
     }
+  }
+
+  /**
+   * Store a word-timed transcript on a recorded Movie/Audio source item via `transcript.set`.
+   * Input is copied, validated and converted to ticks before any await, then bounded by the item's
+   * current duration. One undoable "Set Transcript" edit; replaces any earlier transcript.
+   */
+  async importTranscript(value: TranscriptInput): Promise<SourceTranscript> {
+    let transcript: SourceTranscript;
+    try {transcript = parseTranscript(value);} catch (error) {
+      if (error instanceof TranscriptError) invalid(error.message);
+      throw error;
+    }
+    const project = await this.#inspectProject();
+    const found = binItem(project.root, transcript.sourceItemId);
+    if (!found) invalid(`Source item ${transcript.sourceItemId} is not in the project`);
+    if (found.type !== "Movie" && found.type !== "Audio") invalid(`Source item ${transcript.sourceItemId} is not recorded media`);
+    const duration = integer(found.duration, "source duration");
+    // Words are ordered and non-overlapping, so the last end bounds them all.
+    if ((transcript.words.at(-1)?.end ?? 0) > duration) invalid("Transcript ends after the source duration");
+    const {sourceItemId: item, language, words} = transcript;
+    const result = object(await this.#execute("transcript.set", {item, transcript: {language, words}}), "transcript response");
+    if (result.item !== item || result.words !== words.length) throw new AdapterError("response", "transcript.set stored an unexpected item or word count");
+    return transcript;
   }
 
   async export(settings: {path: string; bitrateKbps?: number}): Promise<{job: number; path: string}> {
