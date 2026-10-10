@@ -3483,12 +3483,16 @@
 	tracks	pistas
 	Assistant	Asistente
 	The assistant is available in the desktop app.	El asistente está disponible en la aplicación de escritorio.
-	Ask the assistant to edit your video…	Pide al asistente que edite tu video…
+	Ask for an edit…	Pide una edición…
+	PROPOSED EDIT	EDICIÓN PROPUESTA
+	The assistant isn't running	El asistente no está en marcha
+	Start it in a terminal, then send your message again:	Inícialo en una terminal y vuelve a enviar tu mensaje:
+	Edit by chatting	Edita conversando
+	Describe a change; you preview it before it lands.	Describe un cambio; lo previsualizas antes de aplicarlo.
 	Send	Enviar
 	Accept	Aceptar
 	Reject	Rechazar
 	Thinking…	Pensando…
-	Ask for an edit, for example “remove the silences”.	Pide una edición, por ejemplo «quita los silencios».
 	You	Tú
 	Assistant service not running: start it with `node shway/assistant.mjs`	El servicio del asistente no está en marcha: inícialo con `node shway/assistant.mjs`
 	Send to Assistant	Enviar al asistente

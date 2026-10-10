@@ -291,6 +291,8 @@ pub struct FilmcraftApp {
     pub workspaces: dock::WorkspacePrefs,
     /// Workspace names and the current one, as last handed to the native menu.
     menu_workspaces: (Vec<String>, String),
+    /// A text field had keyboard focus when the native menu was last updated.
+    menu_text_focus: bool,
 }
 
 pub struct GpuState {
@@ -471,6 +473,7 @@ impl FilmcraftApp {
             workspace_restored: false,
             workspaces,
             menu_workspaces: Default::default(),
+            menu_text_focus: false,
         }
     }
 
@@ -1187,11 +1190,18 @@ impl FilmcraftApp {
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         let workspaces = (dock::names(&self.workspaces), self.ui.workspace.clone());
-        if self.bindings_rev != self.session.shortcuts.revision || workspaces != self.menu_workspaces {
+        // a focused text field, or selected label text (Cmd+C copies it)
+        let text_focus =
+            ctx.egui_wants_keyboard_input() || ctx.with_plugin(|s: &mut egui::text_selection::LabelSelectionState| s.has_selection()).unwrap_or(false);
+        if self.bindings_rev != self.session.shortcuts.revision || workspaces != self.menu_workspaces || text_focus != self.menu_text_focus {
             self.menu_workspaces = workspaces;
+            self.menu_text_focus = text_focus;
             self.bindings = menus::bindings(self);
             self.bindings_rev = self.session.shortcuts.revision;
-            let items = menus::menu_items(self);
+            let mut items = menus::menu_items(self);
+            if text_focus {
+                release_text_chords(&mut items);
+            }
             if let Some(hook) = self.hooks.shortcuts_changed.as_mut() {
                 hook(&items);
             }
@@ -1808,6 +1818,22 @@ pub fn playback_mix(session: &Session, seq_id: filmcraft_project::ItemId, sr: u3
     }
 }
 
+/// The chords a focused text field handles itself (clipboard, select all, undo / redo).
+const TEXT_CHORDS: [&str; 6] = ["Cmd+C", "Cmd+X", "Cmd+V", "Cmd+A", "Cmd+Z", "Cmd+Shift+Z"];
+
+/// On macOS the native menu bar's key equivalents take a key before the window sees it, so with
+/// Edit ▸ Paste on Cmd+V a focused text field never got its paste: Cmd+V ran `edit.paste` on the
+/// timeline instead. While a text field has keyboard focus the native menu gets these items
+/// without their text-editing chords, so the keys reach egui (which turns Cmd+V into a paste of
+/// the clipboard). Every other shortcut, and the menu items themselves, keep working.
+fn release_text_chords(items: &mut [menus::MenuItem]) {
+    for it in items {
+        if it.shortcut.as_deref().is_some_and(|s| TEXT_CHORDS.contains(&s)) {
+            it.shortcut = None;
+        }
+    }
+}
+
 /// The windowing layer (egui-winit, and egui's web backend) reports the clipboard shortcuts as
 /// `Event::Copy` / `Event::Cut` / `Event::Paste` instead of key presses: Ctrl+C/X/V on Windows and
 /// Linux, plus Ctrl+Insert, Shift+Insert and Shift+Delete on Windows. The shortcut bindings only
@@ -1840,6 +1866,21 @@ fn clipboard_events_as_keys(events: &mut Vec<egui::Event>, modifiers: egui::Modi
 #[cfg(test)]
 mod clipboard_key_tests {
     use egui::{Event, Key, Modifiers};
+
+    #[test]
+    fn a_focused_text_field_gets_its_editing_chords_back_from_the_native_menu() {
+        let session = filmcraft_engine::Session::default();
+        let mut items = crate::menus::menu_items_for(&session);
+        let shortcut = |items: &[crate::menus::MenuItem], id: &str| items.iter().find(|i| i.id == id).and_then(|i| i.shortcut.clone());
+        assert_eq!(shortcut(&items, "edit.paste").as_deref(), Some("Cmd+V"), "the native menu owns Cmd+V by default");
+        let save = shortcut(&items, "file.save");
+        assert!(save.is_some());
+        super::release_text_chords(&mut items);
+        for id in ["edit.paste", "edit.copy", "edit.cut", "edit.selectAll", "edit.undo", "edit.redo"] {
+            assert_eq!(shortcut(&items, id), None, "{id} must not take its chord from a text field");
+        }
+        assert_eq!(shortcut(&items, "file.save"), save, "other shortcuts stay");
+    }
 
     fn keys(events: Vec<Event>, m: Modifiers) -> Vec<(Key, Modifiers)> {
         let mut events = events;
