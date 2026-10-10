@@ -178,7 +178,7 @@ function proposalInput(value: EditProposal): EditProposal {
 }
 
 // Find a media item's type and duration in project.inspect's bin tree (bounded walk).
-function binItem(root: unknown, item: number): {type: unknown; duration: unknown} | null {
+export function binItem(root: unknown, item: number): {type: unknown; duration: unknown} | null {
   const stack: unknown[] = [root];
   for (let visited = 0; stack.length && visited < 100_000; visited++) {
     const node = stack.pop();
