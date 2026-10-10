@@ -1,0 +1,392 @@
+<!doctype html>
+<!-- Shway live demo (DEV-93): the real editor plus camera gestures, push-to-talk, the story brief
+     and the proposal bar. Build and serve with: node surface/build-demo.mjs <editor dist> --out dist/demo
+     (see surface/README.md). Keys reach the panel only while it has focus; click the editor to give
+     it the keyboard back (Space, J/K/L, Cmd+Z… are the editor's there). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shway Demo</title>
+<style>
+  :root { --bg: #fff; --fg: #111; --muted: #666; --line: #ddd; --accent: #0a7; --warn: #c50; --rec: #d22; --hi: #fff6d6; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #111; --fg: #eee; --muted: #999; --line: #333; --accent: #3c9; --warn: #f80; --rec: #f55; --hi: #3a3210; } }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 13px system-ui, sans-serif;
+    display: grid; grid-template-columns: 1fr min(360px, 42vw); overflow: hidden; }
+  body.collapsed { grid-template-columns: 1fr 0; }
+  #ed { width: 100%; height: 100%; border: 0; display: block; background: #000; }
+  #panel { overflow-y: auto; border-left: 1px solid var(--line); padding: 8px 10px 16px; display: flex; flex-direction: column; gap: 10px; }
+  body.collapsed #panel { display: none; }
+  #expand { display: none; position: fixed; right: 8px; bottom: 8px; z-index: 2; }
+  body.collapsed #expand { display: block; }
+  header { display: flex; align-items: center; gap: 8px; }
+  header b { font-size: 15px; }
+  #focus { flex: 1; color: var(--muted); font-size: 12px; }
+  #focus[data-panel="true"] { color: var(--accent); }
+  section { border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 6px; }
+  button { font: inherit; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--muted); background: transparent; color: var(--fg); cursor: pointer; }
+  button:disabled { opacity: .4; cursor: default; }
+  button.primary { border-color: var(--accent); background: var(--accent); color: #fff; }
+  kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--line); border-radius: 3px; padding: 0 3px; }
+  #prop[data-pending="true"] { background: var(--hi); border-color: var(--warn); }
+  #propLabel { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+  .buttons { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  .stage { position: relative; width: 100%; aspect-ratio: 4 / 3; background: #000; border-radius: 6px; overflow: hidden; }
+  video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); display: block; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  #state { font-size: 18px; font-weight: 600; margin: 6px 0 2px; }
+  #state[data-s="Adjusting"], #state[data-s="Armed"] { color: var(--accent); }
+  #state[data-s="TrackingLost"], #state[data-s="Cancelled"] { color: var(--warn); }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; margin: 4px 0; }
+  dt { color: var(--muted); }
+  dd { margin: 0; overflow-wrap: anywhere; }
+  .err { color: var(--warn); overflow-wrap: anywhere; }
+  .note { color: var(--muted); overflow-wrap: anywhere; }
+  #ptt { touch-action: none; user-select: none; font-weight: 600; }
+  #ptt[data-rec="true"] { border-color: var(--rec); background: var(--rec); color: #fff; }
+  #ptt[data-rec="true"]::before { content: "● "; }
+  label { display: block; margin: 6px 0 2px; color: var(--muted); }
+  input, textarea { width: 100%; font: inherit; padding: 5px 6px; border: 1px solid var(--line); border-radius: 5px; background: var(--bg); color: var(--fg); }
+  textarea { resize: vertical; }
+  .row { display: flex; gap: 6px; }
+  .row > * { flex: 1; }
+  #plan { white-space: pre-wrap; font: 12px ui-monospace, monospace; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  td { padding: 1px 4px; border-top: 1px solid var(--line); vertical-align: top; }
+  /* Phone width: editor on top, panel scrolls below it. */
+  @media (max-width: 700px) {
+    body, body.collapsed { display: block; overflow: auto; }
+    #ed { height: 60vh; }
+    #panel { border-left: 0; border-top: 1px solid var(--line); overflow: visible; padding: 8px 16px 16px; }
+    .stage { max-width: 320px; }
+  }
+</style>
+</head>
+<body>
+<iframe id="ed" src="index.html" allow="autoplay" title="Editor"></iframe>
+<button id="expand" aria-label="Show the Shway panel">Shway</button>
+<aside id="panel" tabindex="-1" aria-label="Shway panel">
+  <header>
+    <b>Shway</b>
+    <span id="focus" role="status">Keys → editor</span>
+    <button id="collapse" aria-label="Hide the panel">Hide</button>
+  </header>
+
+  <section id="prop" data-pending="false" aria-live="polite">
+    <h2>Preview</h2>
+    <div id="propLabel">No pending proposal</div>
+    <div id="propStatus" class="note"></div>
+    <div class="buttons">
+      <button id="accept" class="primary" disabled>Accept <kbd>A</kbd></button>
+      <button id="reject" disabled>Reject <kbd>X</kbd></button>
+      <button id="undo">Undo <kbd>U</kbd></button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Hands</h2>
+    <div class="stage"><video id="v" autoplay muted playsinline></video><canvas id="o"></canvas></div>
+    <div id="state" data-s="Idle">Idle</div>
+    <dl>
+      <dt>mode</dt><dd id="mode">–</dd>
+      <dt>target</dt><dd id="target">–</dd>
+      <dt>effect</dt><dd id="effect">–</dd>
+      <dt>last</dt><dd id="last">–</dd>
+    </dl>
+    <div id="camErr" class="err"></div>
+  </section>
+
+  <section>
+    <h2>Voice</h2>
+    <button id="ptt" data-rec="false" aria-pressed="false">Hold to talk <kbd>V</kbd></button>
+    <span id="rec" class="note">Not recording</span>
+    <dl>
+      <dt>last said</dt><dd id="said">–</dd>
+      <dt>context</dt><dd id="ctx">–</dd>
+    </dl>
+    <form id="typed" class="row">
+      <input name="text" placeholder="…or type what you'd say" aria-label="Typed instruction" maxlength="500">
+      <button style="flex:0">Send</button>
+    </form>
+    <div id="voiceNote" class="note"></div>
+    <div id="voiceErr" class="err"></div>
+    <div id="replaceNote" class="note"></div>
+  </section>
+
+  <section>
+    <h2>Story brief</h2>
+    <form id="brief" novalidate>
+      <label for="b-message">Message</label>
+      <textarea id="b-message" name="message" rows="2" maxlength="500" placeholder="What should viewers take away?"></textarea>
+      <div class="row">
+        <div><label for="b-audience">Audience</label><input id="b-audience" name="audience" maxlength="500"></div>
+        <div><label for="b-feeling">Feeling</label><input id="b-feeling" name="feeling" maxlength="500"></div>
+      </div>
+      <label for="b-duration">Duration (seconds)</label>
+      <input id="b-duration" name="duration" type="number" min="5" max="600" step="1" value="30">
+      <label for="b-script">Script (one statement per line)</label>
+      <textarea id="b-script" name="script" rows="3"></textarea>
+      <label for="b-transcripts">Transcripts (word-timed JSON, one per source item)</label>
+      <input id="b-transcripts" name="transcripts" type="file" accept="application/json,.json" multiple>
+      <div class="buttons"><button class="primary" id="cut">Make first cut</button></div>
+    </form>
+    <div id="briefErr" class="err" role="alert"></div>
+    <div id="plan"></div>
+  </section>
+
+  <section>
+    <h2>Status</h2>
+    <dl>
+      <dt>editor</dt><dd id="editor">loading…</dd>
+      <dt>Gemini</dt><dd id="gemini">checking…</dd>
+    </dl>
+    <table aria-label="Panel keys and gestures">
+      <tr><td><kbd>A</kbd> / double tap*</td><td>accept preview</td></tr>
+      <tr><td><kbd>X</kbd> / still pinch 0.8 s*</td><td>reject preview (then say why)</td></tr>
+      <tr><td><kbd>U</kbd></td><td>undo last edit</td></tr>
+      <tr><td><kbd>V</kbd> hold / still pinch 0.8 s</td><td>push-to-talk</td></tr>
+      <tr><td><kbd>Space</kbd> hold, <kbd>Shift</kbd></td><td>engage / fine (with a hand)</td></tr>
+      <tr><td><kbd>Esc</kbd></td><td>cancel talk / scrub</td></tr>
+    </table>
+    <div class="note">*while a preview is pending. Keys work when the panel has focus.</div>
+  </section>
+</aside>
+
+<script type="module">
+import { createRecognizer } from "./gestures/recognizer.mjs";
+import { createBridge } from "./gestures/bridge.mjs";
+import { openCamera, runHands, drawOverlay, flashFor, LABELS } from "./gestures/hands.mjs";
+import { createVoice } from "./voice/utterance.mjs";
+import { openMic, createCapture } from "./voice/mic.mjs";
+import { createHoldToTalk, readBrief, createProposals, loadHook } from "./demo.mjs";
+
+const GEMINI = "http://127.0.0.1:8790";
+const $ = (id) => document.getElementById(id);
+const frame = $("ed");
+const keys = { key: false, fine: false, cancel: false };
+let recognizer = createRecognizer();
+const hold = createHoldToTalk();
+const voice = createVoice();
+let flash = null, stream = null, adapter = null, api = null, bridge = null, lastHand = null;
+let context = { revision: null, sequence: null, selection: [], target: null, playhead: null, gesture: "Idle" };
+
+// ---- Proposal bar: one pending preview; Accept/Reject/Undo through the adapter.
+const proposals = createProposals({
+  commit: (t) => need().commit(t), cancel: (t) => need().cancel(t), undo: () => need().undo(),
+}, ({ pending, status, busy }) => {
+  $("prop").dataset.pending = String(!!pending);
+  $("propLabel").textContent = pending ? `Previewing: ${pending.label}` : "No pending proposal";
+  $("propStatus").textContent = status;
+  $("accept").disabled = $("reject").disabled = busy || !pending;
+  $("undo").disabled = busy;
+  render();
+});
+function need() { if (!adapter) throw new Error("the editor is not connected yet"); return adapter; }
+$("accept").onclick = () => proposals.accept();
+$("reject").onclick = () => proposals.reject();
+$("undo").onclick = () => proposals.undo();
+
+// ---- Gestures: recognizer events → voice association, preview accept, or the editor bridge.
+function onGesture(e) {
+  voice.gesture(e);
+  flash = flashFor(e, e.t) ?? flash;
+  $("last").textContent = e.type + (e.rate !== undefined ? ` ${e.rate}×` : e.frames !== undefined ? ` ${e.frames}` : e.direction ? ` ${e.direction}` : "");
+  // Double tap means play/pause, except while a preview is pending: then it accepts (shown in "effect").
+  if (e.type === "double-tap" && proposals.pending) return proposals.accept();
+  if (bridge) bridge(e); else $("last").textContent += " (editor not connected)";
+}
+function onFrame(t, hand) {
+  lastHand = hand;
+  const f = { t, hand, ...keys };
+  keys.cancel = false;
+  for (const e of recognizer.step(f)) onGesture(e);
+  const v = recognizer.view();
+  const h = hold.step(t, v);
+  if (h === "talk") { if (proposals.pending) proposals.reject(); talk(voice.start(t, snapshot(), "gesture")); }
+  else if (h === "done") talk(voice.stop(t));
+  else if (h === "abort") talk(voice.cancel(t));
+  const c = $("o"), video = $("v");
+  if (video.videoWidth && c.width !== video.videoWidth) { c.width = video.videoWidth; c.height = video.videoHeight; }
+  drawOverlay(c, hand, v, t, flash);
+  render();
+}
+
+// ---- Voice: push-to-talk → utterance (with context + gestures) → replacement hook.
+const capture = createCapture(voice, { stream: () => stream, onUtterance: (u) => utterance(u) });
+function talk(e) {
+  if (!e) return;
+  const note = capture(e);
+  if (!(e.type === "rejected" && e.reason === "not-recording")) $("voiceNote").textContent = note;
+  render();
+}
+function snapshot() { return { ...context, gesture: recognizer.view().state }; }
+async function utterance(u) {
+  const secs = ((u.endT - u.startT) / 1000).toFixed(1);
+  $("said").textContent = u.transcript?.text ? `“${u.transcript.text}”` : `${u.source}, ${secs} s, no transcript yet`;
+  const hook = await loadHook("./replace.js", ["proposeReplacement"]);
+  if (hook.error) return void ($("replaceNote").textContent = `Replacement: ${hook.error}`);
+  $("replaceNote").textContent = "Proposing a replacement…";
+  try {
+    const r = await hook.module.proposeReplacement(u, { adapter: need(), gemini: GEMINI });
+    $("replaceNote").textContent = "";
+    await proposals.show(r);
+  } catch (err) { $("replaceNote").textContent = `Replacement failed: ${err?.message ?? err}`; }
+}
+let typedN = 0;
+$("typed").onsubmit = (ev) => {
+  ev.preventDefault();
+  const text = ev.target.text.value.trim();
+  if (!text) return;
+  const t = performance.now();
+  utterance({ id: `typed${++typedN}`, source: "button", startT: t, endT: t, capped: false, context: snapshot(), gestures: [], audio: null, transcript: { text } });
+  ev.target.text.value = "";
+};
+const ptt = $("ptt");
+ptt.addEventListener("pointerdown", (e) => { ptt.setPointerCapture(e.pointerId); talk(voice.start(performance.now(), snapshot(), "button")); });
+for (const ev of ["pointerup", "pointercancel"]) ptt.addEventListener(ev, () => { if (voice.view().recording) talk(voice.stop(performance.now())); });
+(function tick() { talk(voice.tick(performance.now())); requestAnimationFrame(tick); })();
+
+// ---- Brief → first cut hook (shway/firstcut.ts: planFirstCut, assembleFirstCut).
+$("brief").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const form = ev.target, err = $("briefErr");
+  err.textContent = ""; $("plan").textContent = "";
+  const r = readBrief(Object.fromEntries(new FormData(form)));
+  if (r.error) return void (err.textContent = r.error);
+  const files = [...form.transcripts.files];
+  if (!files.length) return void (err.textContent = "Add at least one transcript JSON file.");
+  const hook = await loadHook("./firstcut.js", ["planFirstCut", "assembleFirstCut", "proxyGenerate"]);
+  if (hook.error) return void (err.textContent = `First cut: ${hook.error}`);
+  $("cut").disabled = true;
+  try {
+    const { parseTranscript, indexTakes } = await import("./takes.js");
+    const transcripts = [];
+    for (const f of files) {
+      if (f.size > 8 << 20) throw new Error(`${f.name} is larger than 8 MB`);
+      const json = JSON.parse(await f.text());
+      for (const one of Array.isArray(json) ? json : [json]) transcripts.push(parseTranscript(one));
+    }
+    const takes = indexTakes(transcripts, r.script);
+    $("plan").textContent = `${takes.length} takes indexed. Asking Gemini…`;
+    const { planFirstCut, assembleFirstCut, proxyGenerate } = hook.module;
+    const plan = await planFirstCut({ brief: r.brief, script: r.script, takes, generate: proxyGenerate(`${GEMINI}/generate`) });
+    $("plan").textContent = plan.choices.map((c) => `${c.statementIndex + 1}. ${c.reason}`).join("\n") +
+      (plan.skipped.length ? `\nNo take for statement ${plan.skipped.map((i) => i + 1).join(", ")}` : "");
+    const result = await assembleFirstCut(need(), plan);
+    if (Number.isSafeInteger(result?.token)) await proposals.show(result);
+    else proposals.note("First cut applied. Undo reverts it.");
+  } catch (e) { err.textContent = `First cut failed: ${e?.message ?? e}`; }
+  finally { $("cut").disabled = false; }
+};
+
+// ---- Keys: only while the panel (this document) has focus; the editor iframe keeps its own keys.
+const typing = (el) => el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement ||
+  (el instanceof HTMLInputElement && !["button", "submit", "file", "checkbox"].includes(el.type));
+addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { keys.cancel = true; if (voice.view().recording) talk(voice.cancel(performance.now())); return; }
+  if (typing(e.target) || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.code === "Space") { keys.key = true; e.preventDefault(); }
+  if (e.key === "Shift") keys.fine = true;
+  if (e.repeat) return;
+  if (e.code === "KeyV") { e.preventDefault(); talk(voice.key(performance.now(), e.code, true, snapshot())); }
+  if (e.code === "KeyA") proposals.accept();
+  if (e.code === "KeyX") proposals.reject();
+  if (e.code === "KeyU") proposals.undo();
+});
+addEventListener("keyup", (e) => {
+  if (e.code === "Space") { keys.key = false; e.preventDefault(); }
+  if (e.key === "Shift") keys.fine = false;
+  talk(voice.key(performance.now(), e.code, false));
+});
+// A lost keyup must not leave control engaged or the mic recording (also fires when the editor takes focus).
+addEventListener("blur", () => {
+  keys.key = keys.fine = false;
+  if (voice.view().recording) talk(voice.cancel(performance.now()));
+});
+$("collapse").onclick = () => { document.body.classList.add("collapsed"); frame.focus(); };
+$("expand").onclick = () => document.body.classList.remove("collapsed");
+
+// ---- What the hands do right now: mode, target and effect are always visible.
+function render() {
+  const v = recognizer.view(), rec = voice.view(), p = proposals.pending;
+  $("state").textContent = rec.recording ? "Talking" : v.state; $("state").dataset.s = v.state;
+  const sel = context.target ? `clip ${context.target}` : context.selection.length ? `${context.selection.length} clips (select one)` : "no clip selected";
+  let mode, target, effect;
+  if (rec.recording) [mode, target, effect] = ["Talk", sel, "let go of the pinch / V to finish · Esc cancels"];
+  else if (v.state === "Armed" || v.state === "Adjusting") [mode, target, effect] = [v.fine ? "Fine step" : `Shuttle ${v.rate}×`, "playhead", v.fine ? "twist steps frames" : "twist sets speed · release keeps position · Esc returns"];
+  else if (p) [mode, target, effect] = ["Preview", p.label, "double tap / A accepts · still pinch / X rejects and talks"];
+  else [mode, target, effect] = ["Navigate", "playhead", "pinch+twist scrubs · swipe next/prev edit · chop cuts · double tap play/pause · still pinch talks"];
+  if (v.state === "TrackingLost" || v.state === "Cancelled") effect = LABELS[v.state];
+  $("mode").textContent = mode; $("target").textContent = target; $("effect").textContent = effect;
+  ptt.dataset.rec = String(rec.recording); ptt.setAttribute("aria-pressed", String(rec.recording));
+  $("rec").textContent = rec.recording ? `Recording ${rec.id}` : "Not recording";
+  $("ctx").textContent = `rev ${context.revision ?? "–"} · seq ${context.sequence ?? "–"} · ${sel} · playhead ${context.playhead ?? "–"}`;
+  const panel = document.hasFocus() && document.activeElement !== frame;
+  $("focus").dataset.panel = String(panel);
+  $("focus").textContent = panel ? "Keys → panel" : "Keys → editor";
+}
+addEventListener("focus", render); addEventListener("blur", render);
+
+// ---- Editor connection (same origin) and context polling for utterance snapshots.
+async function connectEditor() {
+  const status = (t) => { $("editor").textContent = t; };
+  for (let i = 0; i < 1200 && !api; i++) {
+    const w = frame.contentWindow;
+    if (w?.filmcraftLoad?.fatal) return status(`stopped: ${w.filmcraftLoad.fatal}`);
+    if (w?.filmcraft && w.filmcraftLoad?.readyMs) api = w.filmcraft;
+    else await new Promise((r) => setTimeout(r, 100));
+  }
+  if (!api) return status("did not start within 2 minutes");
+  const { ShwayAdapter } = await import("./adapter.js");
+  adapter = await ShwayAdapter.connect(api);
+  bridge = createBridge(adapter, { onError: (err, e) => { $("last").textContent = `${e.type} failed: ${err?.message ?? err}`; } });
+  status("connected");
+  frame.focus(); // normal editing keys go to the editor until the panel is clicked
+  let polling = false;
+  // ponytail: 500 ms poll; an engine change event would make snapshots exact.
+  setInterval(async () => {
+    if (polling) return;
+    polling = true;
+    try {
+      const [p, ui] = await Promise.all([api.execute("project.inspect"), api.request("ui.inspect")]);
+      const selection = Array.isArray(ui?.selection) ? ui.selection : [];
+      context = { revision: p?.revision ?? null, sequence: p?.activeSequence ?? null, selection,
+        target: selection.length === 1 ? selection[0] : null, playhead: ui?.playhead ?? null, gesture: recognizer.view().state };
+      render();
+    } catch (e) { status(`inspect failed: ${e?.message ?? e}`); }
+    polling = false;
+  }, 500);
+}
+connectEditor().catch((e) => { $("editor").textContent = `connection failed: ${e?.message ?? e}`; });
+
+async function gemini() {
+  try {
+    const r = await fetch(`${GEMINI}/health`);
+    const b = await r.json();
+    $("gemini").textContent = b.ok ? `ok (${b.model})` : `not ok (${r.status})`;
+  } catch { $("gemini").textContent = "offline: run node shway/gemini-server.mjs --port 8790"; }
+}
+gemini(); setInterval(gemini, 10000);
+
+// ---- Camera and microphone: both optional; failures are reported, the editor keeps working.
+(async () => {
+  const video = $("v");
+  try { await openCamera(video); }
+  catch (e) { return void ($("camErr").textContent = `Camera unavailable: ${e.name}: ${e.message}. Mouse and keys still work.`); }
+  if (video.videoWidth && video.videoHeight) recognizer = createRecognizer({ aspect: video.videoWidth / video.videoHeight });
+  await runHands(video, (t, _t0, hand) => onFrame(t, hand));
+})().catch((e) => { $("camErr").textContent = `Hand tracking failed: ${e.message}`; });
+openMic().then((m) => { if (m.error) $("voiceErr").textContent = m.error; else stream = m.stream; });
+
+// Automation / testing hooks.
+window.shwayDemo = {
+  gesture: (e) => onGesture({ t: performance.now(), ...e }), frame: (hand, k = {}) => { Object.assign(keys, k); onFrame(performance.now(), hand); },
+  proposals, voice, get adapter() { return adapter; }, get context() { return context; }, get recognizer() { return recognizer; },
+};
+render();
+</script>
+</body>
+</html>
