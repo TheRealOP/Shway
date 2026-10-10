@@ -6,7 +6,7 @@ Contract: [interactions](../../docs/wiki/interactions.md).
 | File | What |
 | --- | --- |
 | `recognizer.mjs` | Pure, deterministic recognizer (`createRecognizer`, `replay`). Runs in Node and browsers, no build step. |
-| `recognizer.test.mjs` | Replay tests: `node --test surface/gestures/recognizer.test.mjs` (Node ≥ 22, no packages). |
+| `recognizer.test.mjs` | Replay tests: `node --test surface/gestures/*.test.mjs` (Node ≥ 22, no packages). |
 | `camera.html` | Camera harness: MediaPipe Hand Landmarker → recognizer → hand overlay (skeleton, pinch meter, twist dial with dead zone/speed bands/fine detents, tap dot, chop-ready blade line, gesture flash), latency, trace recorder (R). |
 | `bridge.mjs` | Gesture events → `shway/adapter.ts` calls (serialized, latest-wins shuttle). Tests: `bridge.test.mjs`. |
 | `traces/*.json` | Recorded traces (none yet). Every file is replayed by the tests; names starting `rest` must emit nothing. |
@@ -107,7 +107,7 @@ is the adapter's to confirm.
 
 ## Handoff: status and evidence (2026-10-10)
 
-- **Verified:** 17 replay tests pass (Node 26.4). They were mutation-checked: removing the
+- **Verified:** 28 recognizer replay tests + 7 bridge tests pass (Node 26.4). They were mutation-checked: removing the
   re-engage latch, cooldown, handedness mirror, dead zone, rate bound, fine-switch guard,
   handedness-flip check, post-release quiet, or backwards-time guard each fails ≥1 test.
 - **Verified:** `camera.html` loads and reports camera permission denial in Claude's browser pane.

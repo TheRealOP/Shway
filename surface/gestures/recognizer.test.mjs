@@ -1,4 +1,4 @@
-// Replay tests for the gesture recognizer. Run: node --test surface/gestures/
+// Replay tests for the gesture recognizer. Run: node --test surface/gestures/*.test.mjs
 // Traces are synthetic (a posed hand model + seeded jitter) until real recordings exist;
 // any *.json in ./traces is also replayed for crash-safety and resting-hand checks.
 import { test } from "node:test";
