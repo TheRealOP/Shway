@@ -370,18 +370,22 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     ui.horizontal(|ui| {
                         let send_w = 32.0;
                         let input_w = (ui.available_width() - send_w - ui.spacing().item_spacing.x).max(40.0);
-                        egui::ScrollArea::vertical().id_salt("assistant-input-scroll").max_height(MAX_INPUT_LINES * LINE + 12.0).show(ui, |ui| {
-                            let edit = egui::TextEdit::multiline(&mut st.draft)
-                                .id(edit_id)
-                                .frame(egui::Frame::NONE)
-                                .font(egui::FontId::proportional(BODY))
-                                .desired_rows(1)
-                                .desired_width(input_w)
-                                .margin(egui::Margin::symmetric(0, 6))
-                                .hint_text(tl!("Ask for an edit…"));
-                            let r = ui.add(edit);
-                            elems.push(("assistant.input".into(), r.rect, "Message".into()));
-                        });
+                        egui::ScrollArea::vertical()
+                            .id_salt("assistant-input-scroll")
+                            .min_scrolled_height(LINE)
+                            .max_height(MAX_INPUT_LINES * LINE + 12.0)
+                            .show(ui, |ui| {
+                                let edit = egui::TextEdit::multiline(&mut st.draft)
+                                    .id(edit_id)
+                                    .frame(egui::Frame::NONE)
+                                    .font(egui::FontId::proportional(BODY))
+                                    .desired_rows(1)
+                                    .desired_width(input_w)
+                                    .margin(egui::Margin::symmetric(0, 6))
+                                    .hint_text(tl!("Ask for an edit…"));
+                                let r = ui.add(edit);
+                                elems.push(("assistant.input".into(), r.rect, "Message".into()));
+                            });
                         let fill = if can_send { accent } else { v.widgets.inactive.weak_bg_fill };
                         let arrow = RichText::new("↑").size(17.0).strong().color(if can_send { on_accent } else { weak });
                         let b = ui.add_enabled(can_send, egui::Button::new(arrow).fill(fill).corner_radius(255).min_size(vec2(send_w, send_w)));
