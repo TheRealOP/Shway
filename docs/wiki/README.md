@@ -7,6 +7,11 @@ Each page links to related concepts; the map below shows how they connect.
 gesture implementation, export test, or TRIBE benchmark has been recorded.
 Update this statement when there is evidence, with a commit or reproducible result.
 
+## Handoff and HTML plan
+
+- [Implementation handoff](../HANDOFF.md): current state, first-session checklist, decisions, and open questions.
+- [HTML implementation plan](../shway-implementation-plan.html): download or open from a checkout in a browser. GitHub displays the source; this file is not a hosted deployment.
+
 ## Start a task
 
 1. Read [AGENTS.md](../../AGENTS.md), [CLAUDE.md](../../CLAUDE.md), and [YAGNI](yagni.md).

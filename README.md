@@ -6,6 +6,8 @@ An AI video editor directed through voice and hand gestures, built on Filmcraft.
 Agents: read [AGENTS.md](AGENTS.md), [CLAUDE.md](CLAUDE.md), and
 [YAGNI guidance](docs/wiki/yagni.md) before implementation.
 
+[Implementation handoff](docs/HANDOFF.md) ·
+[HTML plan](docs/shway-implementation-plan.html) (download/open locally) ·
 [Linear backlog](https://linear.app/dev-system/project/schway-4deadf7f36cc) ·
 [Build gates](docs/wiki/implementation.md) · [Architecture](docs/wiki/architecture.md)
 
