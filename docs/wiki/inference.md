@@ -27,7 +27,7 @@ and multi-source sync in takes, and persisting the take index.
 
 ## First-cut take choice
 
-**Status (DEV-89, planning verified; DEV-90 assembly glue planned):** [`shway/firstcut.ts`](../../shway/firstcut.ts)
+**Status (DEV-89 planning and DEV-90 assembly glue verified on synthetic media):** [`shway/firstcut.ts`](../../shway/firstcut.ts)
 validates an editable StoryBrief and asks the model, through the local Gemini proxy, to choose one
 indexed take per script statement by opaque number. Output is checked strictly (one valid,
 statement-matching take per statement, no extra fields, one retry with the error) and every range
@@ -36,8 +36,15 @@ happy path, invented/wrong-statement/duplicate/missing choices, non-JSON, retry 
 briefs and takes; 15 of 16 guard mutations fail a test, the survivor is a defensive rethrow), and one
 live `gemini-3.8-flash` call on the synthetic three-take fixture that returned
 `{choices:[{statementIndex, take, reason}]}`, passed validation first time, and avoided the "uh" take.
-`assembleFirstCut` stages the ranges via DEV-90's `adapter.assemble`; not yet verified in the
-browser against a real engine. Real creator speech and brief-driven duration limits remain open.
+`assembleFirstCut` frame-aligns the ranges and stages them via DEV-90's `adapter.assemble`.
+**Browser end-to-end verified** October 10, 2026 (Chrome pane, wasm release build of this branch,
+generated 25 s 24 fps fixture plus the synthetic transcript, one more live Gemini call):
+`importTranscript` → `indexTakes` (6 takes) → `planFirstCut` chose the clean statement-0 take and the
+"!" statement-1 take (skipping "uh") → preview token 1 placed 2 V + 2 A clips back to back
+(`sourceOut` widened to the 24 fps grid), with the accepted sequence unchanged → `commit` →
+one `undo` ("AI first cut") restored the empty sequence. Not verified: real creator speech,
+export of the cut, and brief-driven duration limits (the model sees `durationSeconds` but nothing
+enforces it).
 
 ## TRIBE flow
 

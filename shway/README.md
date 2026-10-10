@@ -123,6 +123,12 @@ const plan = await planFirstCut({brief, script, takes, generate: proxyGenerate()
   `planFirstCut` throws `FirstCutError`. Transport errors from `generate` propagate without retry.
 - **Bounds:** ≤200 statements, ≤400 takes; take times are copied before the model call.
 - `generate` is injected (`proxyGenerate(url)` posts to the local Gemini proxy and returns its `json`).
+- **Assembly:** `const preview = await assembleFirstCut(adapter, plan)` reads the active sequence
+  and its `settings.frame_rate`. It widens each range outward with `alignRange` and stages the
+  ranges, in script order, after the sequence's content via `adapter.assemble` (`timeline.place`,
+  V1 + linked A1). Then `adapter.commit(preview.token)` (one undo step) or `adapter.cancel(...)`.
+  Use an empty sequence for a clean cut. It needs an active sequence and 1–32 ranges. A last word
+  that ends exactly at the source end can widen past it and be refused.
 
 ## Gemini proxy (creative reasoning)
 
