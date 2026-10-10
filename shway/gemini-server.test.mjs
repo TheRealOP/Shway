@@ -101,3 +101,32 @@ test("local pages get CORS headers; health reports the model, not the key", asyn
   assert.ok(!JSON.stringify(h.json).includes(KEY));
   await s.close();
 });
+
+test("transcribe forwards inline audio with a verbatim instruction and returns text", async () => {
+  const s = await serve({ status: 200, body: { candidates: [{ content: { parts: [{ text: "use the take where I laugh" }] } }] } });
+  const data = Buffer.from("RIFF fake wav").toString("base64");
+  const r = await s.call("/transcribe", { body: { mimeType: "audio/webm;codecs=opus", data }, headers: { origin: "http://127.0.0.1:8771" } });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.text, "use the take where I laugh");
+  const [{ url, body }] = s.seen;
+  assert.match(url, /gemini-3\.8-flash:generateContent$/);
+  assert.deepEqual(body.contents[0].parts[0], { inlineData: { mimeType: "audio/webm", data } });
+  assert.match(body.contents[0].parts[1].text, /verbatim/);
+  assert.equal(body.generationConfig, undefined);
+  await s.close();
+});
+
+test("transcribe rejects bad audio requests before calling Gemini; only it gets the larger cap", async () => {
+  const s = await serve();
+  for (const body of [{}, { mimeType: "video/mp4", data: "AAAA" }, { mimeType: "audio/wav" }, { mimeType: "audio/wav", data: "" },
+    { mimeType: "audio/wav", data: "not base64!" }, { mimeType: "audio/wav", data: "AAAA", prompt: "x" }, { mimeType: 5, data: "AAAA" }]) {
+    assert.equal((await s.call("/transcribe", { body })).status, 400, JSON.stringify(body));
+  }
+  const big = "A".repeat(5 * 1024 * 1024);
+  assert.equal((await s.call("/generate", { body: { prompt: big } })).status, 413);
+  assert.equal((await s.call("/transcribe", { body: { mimeType: "audio/wav", data: "A".repeat(11 * 1024 * 1024) } })).status, 413);
+  assert.equal((await s.call("/transcribe", { body: { mimeType: "audio/wav", data: big } })).status, 200);
+  assert.equal((await s.call("/transcribe", { body: { mimeType: "audio/wav", data: "AAAA" }, headers: { origin: "https://evil.example" } })).status, 403);
+  assert.equal(s.seen.length, 1);
+  await s.close();
+});

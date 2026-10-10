@@ -11,7 +11,10 @@ import { fileURLToPath } from "node:url";
 
 export const DEFAULT_MODEL = "gemini-3.8-flash";
 const API = "https://generativelanguage.googleapis.com/v1beta/models";
-const MAX_BODY = 2 * 1024 * 1024; // ponytail: text-only for now; raise when frames/audio are sent inline
+const MAX_BODY = 2 * 1024 * 1024;
+const MAX_AUDIO_BODY = 10 * 1024 * 1024; // /transcribe only: base64 audio of a ≤15 s push-to-talk
+const AUDIO_TYPES = ["audio/webm", "audio/ogg", "audio/mp4", "audio/wav"];
+const TRANSCRIBE = "Transcribe this audio verbatim. Return only the spoken words, no commentary, labels or timestamps.";
 const MAX_PROMPT = 500_000;
 const TIMEOUT_MS = 90_000;
 
@@ -71,6 +74,21 @@ export function buildRequest(body, defaultModel = DEFAULT_MODEL) {
   };
 }
 
+/** Validate a /transcribe request ({mimeType, data: base64}) and build the generateContent body. */
+export function buildTranscribeRequest(body, model = DEFAULT_MODEL) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) throw new HttpError(400, "body must be a JSON object");
+  for (const k of Object.keys(body)) if (!["mimeType", "data"].includes(k)) throw new HttpError(400, `unsupported field ${k}`);
+  const { mimeType, data } = body;
+  // MediaRecorder reports e.g. "audio/webm;codecs=opus": accept parameters on an allowed base type.
+  if (typeof mimeType !== "string" || !AUDIO_TYPES.includes(mimeType.split(";")[0].trim().toLowerCase())) throw new HttpError(400, `mimeType must be one of ${AUDIO_TYPES.join(", ")}`);
+  if (typeof data !== "string" || !data || !/^[A-Za-z0-9+/]+={0,2}$/.test(data)) throw new HttpError(400, "data must be non-empty base64");
+  return {
+    model,
+    json: false,
+    payload: { contents: [{ role: "user", parts: [{ inlineData: { mimeType: mimeType.split(";")[0].trim().toLowerCase(), data } }, { text: TRANSCRIBE }] }] },
+  };
+}
+
 /** @param {{key: string, model?: string, fetch?: typeof fetch}} opts */
 export function createGeminiServer({ key, model = DEFAULT_MODEL, fetch: doFetch = fetch }) {
   if (!key) throw new Error("GEMINI_API_KEY is empty");
@@ -93,19 +111,24 @@ export function createGeminiServer({ key, model = DEFAULT_MODEL, fetch: doFetch 
         return res.end();
       }
       if (req.method === "GET" && req.url === "/health") return send(200, { ok: true, model });
-      if (req.method !== "POST" || req.url !== "/generate") throw new HttpError(404, "use POST /generate or GET /health");
+      const route = req.method === "POST" && (req.url === "/generate" || req.url === "/transcribe") ? req.url : null;
+      if (!route) throw new HttpError(404, "use POST /generate, POST /transcribe or GET /health");
+      const limit = route === "/transcribe" ? MAX_AUDIO_BODY : MAX_BODY;
       if (!String(req.headers["content-type"] ?? "").startsWith("application/json")) throw new HttpError(415, "content-type must be application/json");
 
       let size = 0;
       const chunks = [];
       for await (const c of req) {
         size += c.length;
-        if (size > MAX_BODY) throw new HttpError(413, "request body too large");
-        chunks.push(c);
+        // Keep reading (and discarding) a modestly oversized upload so the client sees the 413
+        // instead of a broken pipe; cut off anything far larger.
+        if (size > 4 * limit) return req.destroy();
+        if (size <= limit) chunks.push(c);
       }
+      if (size > limit) throw new HttpError(413, "request body too large");
       let body;
       try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { throw new HttpError(400, "invalid JSON"); }
-      const r = buildRequest(body, model);
+      const r = route === "/transcribe" ? buildTranscribeRequest(body, model) : buildRequest(body, model);
 
       const upstream = await doFetch(`${API}/${r.model}:generateContent`, {
         method: "POST",
