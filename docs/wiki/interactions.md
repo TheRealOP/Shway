@@ -64,6 +64,25 @@ while push-to-talk is held. Replay tests pass and are mutation-checked. The harn
 microphone denial. Live microphone capture, speaker bleed and speech-to-text (no provider chosen)
 are not verified. Target resolution and proposal creation remain DEV-92 work.
 
+**Take replacement status 2026-10-10 (DEV-92):** [shway/replace.ts](../../shway/README.md#take-replacement-dev-92)
+turns a transcript and its context snapshot into a previewed replacement. The target is the
+captured selection: one clip or its linked A/V pair. With no clip or several clips selected it
+asks for a selection and does not call the model. Gemini chooses only among the indexed takes of
+the same statement, which it sees as opaque numbers. Rust stages the edit. Accept, reject and undo
+each take one step. Speech-to-text runs through the local proxy's `POST /transcribe`.
+
+- **Verified:** tests pass and are mutation-checked.
+- **Verified:** one live transcription returned the exact spoken sentence.
+- **Verified:** a live model choice picked the laughing take.
+- **Verified:** in the real browser engine with generated fixtures:
+  - The flow ran from preview through commit, a single undo, cancel and a stale rejection.
+  - The preview rendered the chosen take's frames.
+  - The replacement worked within one source item and from another source item.
+- **Not verified:**
+  - A live microphone recording.
+  - The demo page as a whole.
+  - Replacement items that have source In marks.
+
 ## Related pages
 
 [Wiki map](README.md) · [Architecture](architecture.md) · [Adaptation](adaptation.md) · [Acceptance](acceptance.md)

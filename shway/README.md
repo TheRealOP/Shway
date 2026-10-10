@@ -98,10 +98,93 @@ node shway/gemini-server.mjs --port 8790      # reads GEMINI_API_KEY (optional G
 - **`POST /generate`:** body `{prompt, system?, schema?, model?}`. It returns `{model, usage, text}`,
   or `{model, usage, json}` when you pass a `schema`. A `schema` is a Gemini `responseSchema`
   (OpenAPI subset: `OBJECT`, `STRING`, …).
+- **`POST /transcribe`:** body `{mimeType, data}`. `mimeType` is `audio/webm`, `audio/ogg`,
+  `audio/mp4` or `audio/wav`; a codec parameter such as `;codecs=opus` is allowed. `data` is base64.
+  The route sends the audio inline to Gemini with an instruction to transcribe verbatim and returns
+  `{model, usage, text}`. Request bodies may be up to 10 MB on this route only.
 - **`GET /health`:** returns `{ok, model}`.
 - **Default model:** `gemini-3.8-flash`. It calls `models/{model}:generateContent` with the key in the
   `x-goog-api-key` header.
-- **Safety:** only pages served from this machine (localhost, 127.0.0.1, [::1]) may call it. Bodies over
-  2 MB are refused. Upstream errors never echo the key.
+- **Safety:** only pages served from this machine (localhost, 127.0.0.1, [::1]) may call it.
+  Bodies over 2 MB are refused (10 MB for `/transcribe`). The proxy keeps reading an upload up to
+  4× the limit, so the client receives the 413 response instead of a broken pipe. Upstream errors never echo the key.
 - **Verified 2026-10-10:** 9 tests against a fake upstream. One live structured call with the real key:
   a three-take choice returned `{take, reason}` JSON.
+- **Verified 2026-10-10 (DEV-92):** 11 tests against the fake upstream. One live `/transcribe` call
+  sent a macOS `say` recording of "That sounds rehearsed. Use the take where I laugh." as WAV.
+  The proxy returned that sentence exactly.
+
+## Take replacement (DEV-92)
+
+`replace.ts` turns a spoken correction about the selected clip into a previewed, reversible take
+replacement. Build `replace.js` beside `adapter.js` with `node shway/build.mjs --out <dist>`.
+
+```js
+import {proposeReplacement, geminiGenerate, transcribe} from "/replace.js";
+utterance.transcript ??= await transcribe(utterance.audio);          // {text} via POST /transcribe
+const r = await proposeReplacement({utterance, takes, generate: geminiGenerate(), adapter});
+// takes = indexTakes(transcripts, script); optional overrides: transcript (string), context
+if (r.status === "preview") { /* show r.label, r.explanation; then */ await adapter.commit(r.token); /* or adapter.cancel(r.token) */ }
+else showMessage(r.message);  // "need-selection" | "no-take" | "rejected"
+// After a commit, adapter.undo() removes the whole replacement in one step.
+```
+
+`proposeReplacement` works in these steps:
+
+1. **Context:** it reads `utterance.context` (`{revision, sequence, selection}`), the snapshot taken
+   when push-to-talk started.
+2. **Target:** the selection must be exactly one clip, or that clip's linked A/V pair. With no
+   clip or several clips selected it returns `need-selection` and does not call the model.
+3. **Current take:** it maps the clip to the indexed take whose source range overlaps the clip's
+   range the most.
+4. **Choice:** Gemini sees the other takes of the same statement only as numbers with their words,
+   never as IDs or times. It must answer with a schema-checked index. An answer that is out of
+   range, not an integer, the current take, or `-1` (none fits) returns `rejected`, and nothing is
+   staged.
+5. **Steps:** the chosen take covers whole frames: the first frame at or before its first word,
+   through the last frame at or after its last word.
+   - A take in the same source item needs two ripple trims, which slip and resize the clip in
+     place. The order keeps every intermediate range valid.
+   - A take in another source item first gets a ripple Out trim if it is shorter. Then comes
+     `clip.replaceFromBin` (no `keepSourceIn`) and the same two trims.
+   - Ripple trims shift later clips, so the new take's length is kept exactly.
+6. **Preview:** the steps go to `adapter.preview` with the snapshot's revision. If the staged clip
+   does not have the expected item, source In and duration, the preview is cancelled and the result
+   is `rejected`.
+
+Errors from `adapter.preview` are passed through unchanged for re-planning. These include a stale
+revision or interaction context (`AdapterError` code `stale`), a source too short for the take
+(`clip range must be positive and contained in its source`), missing handles, and sync locks.
+
+Limitations: `project.inspect` does not expose source marks, so a replacement item with a source
+In mark stages a range other than the take. The staged-range check then cancels the preview. A
+take ending in the last partial frame of its media can be rejected by the engine. Ripple trims
+follow the engine's sync-lock rules, and a locked track refuses the edit.
+
+Evidence (2026-10-10):
+
+- **Tests:** `node --test shway/replace.test.ts` runs 8 tests with a fake model and adapter. They
+  cover the happy path, a take in another item, an earlier take, missing, several or unknown
+  selections, invented, current and declined takes, a missing transcript or take, stale-revision
+  and engine-error passthrough, and a staged-range mismatch. Mutation check: removing any of 22
+  guards fails at least one test.
+- **Live model:** for "That sounds rehearsed; use the take where I laugh", Gemini picked the
+  `[laughs]` take out of three.
+- **Real browser engine:** a prebuilt web dist ran with generated fixtures. `takes.mp4` holds
+  three 4 s color takes and `other-take.mp4` is a 3 s alternative. A hand-written transcript was
+  imported and the take index built.
+  - Selecting the clip and running the demo line through live Gemini produced a preview with
+    ripple trims +85 Out and +103 In.
+  - The authoritative timeline and history were unchanged until commit.
+  - The candidate frame rendered green, which is the laughing take.
+  - Commit made one undo step labelled `Replace take: …`, and `undo()` restored the original.
+  - Selecting the audio half and choosing the other source item staged a trim, `replaceFromBin`
+    and two more trims. The frame rendered yellow, commit and a single undo worked, and cancel left
+    the timeline unchanged.
+  - An edit made after the snapshot raised `AdapterError/stale`, and an empty selection returned
+    `need-selection`.
+- **Not verified:**
+  - A live microphone utterance through the demo page.
+  - Replacement items with source marks.
+  - Projects with sync-locked tracks. The demo project's A2 sync lock refused a replacement in
+    the demo agent's run.
