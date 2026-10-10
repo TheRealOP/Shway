@@ -186,3 +186,31 @@ test("decider contract: grounded candidates without a model call; only offered i
   assert.deepEqual(f.calls, ["inspect", "preview"]);
   assert.equal(f.proposal()?.expectedRevision, 4); // bound to the push-to-talk snapshot
 });
+
+test("jevDecide sends named choices without ids or times; low confidence becomes review", async () => {
+  const {jevDecide} = await import("./replace.ts");
+  const sent: any[] = [];
+  let answer: any = {type: "choice", choice: "take-1", confidence: 0.97, probabilities: {}};
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url: string, init: {body: string}) => {
+    sent.push(JSON.parse(init.body));
+    return {ok: true, status: 200, json: async () => ({model: "jev-1.13.0", answers: {take: answer}})};
+  }) as never;
+  try {
+    const f = fixture();
+    const r = await proposeReplacement({...f.input(), generate: undefined, decide: jevDecide("http://proxy")});
+    assert.equal(r.status, "preview");
+    if (r.status === "preview") assert.equal(r.take, TAKES[1]);
+    assert.match(r.status === "preview" ? r.explanation : "", /Jev \(jev-1\.13\.0, confidence 0\.97\) chose/);
+    const q = sent[0];
+    assert.deepEqual(Object.keys(q.questions.take.criteria), ["take-1", "take-2", "no-change", "review"]); // current take not offered
+    assert.equal(q.state.current_take, "Welcome to the workshop.");
+    assert.doesNotMatch(JSON.stringify(q), /31|32|sourceIn/);
+    for (const [a, status] of [[{...answer, confidence: 0.4}, "rejected"], [{...answer, choice: "take-0"}, "rejected"], [{...answer, choice: "made-up"}, "rejected"], [{...answer, choice: "review"}, "rejected"]] as const) {
+      answer = a;
+      const g = fixture();
+      assert.equal((await proposeReplacement({...g.input(), generate: undefined, decide: jevDecide("http://proxy")})).status, status);
+      assert.ok(!g.calls.includes("preview"), JSON.stringify(a));
+    }
+  } finally {globalThis.fetch = realFetch;}
+});

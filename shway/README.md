@@ -148,7 +148,10 @@ node shway/gemini-server.mjs --port 8790      # reads GEMINI_API_KEY (optional G
   `audio/mp4` or `audio/wav`; a codec parameter such as `;codecs=opus` is allowed. `data` is base64.
   The route sends the audio inline to Gemini with an instruction to transcribe verbatim and returns
   `{model, usage, text}`. Request bodies may be up to 10 MB on this route only.
-- **`GET /health`:** returns `{ok, model}`.
+- **`GET /health`:** returns `{ok, model, jev}`.
+- **`POST /decide`:** with `JEV_KEY` in the `.env`, forwards `{state, questions, model?}` (1–8 questions;
+  the model must be `jev-*`, default `jev-latest`) to TypeSafe `POST /v1/systemone` with the key as a bearer
+  token. Returns `{model, answers, usage}`. Without a key it returns 503. Errors never contain either key.
 - **Default model:** `gemini-3.8-flash`. It calls `models/{model}:generateContent` with the key in the
   `x-goog-api-key` header.
 - **Safety:** only pages served from this machine (localhost, 127.0.0.1, [::1]) may call it.
@@ -209,7 +212,18 @@ model call. `stageReplacement(prepared, choice, explanation, adapter)` stages on
 Staging uses the snapshot revision, so a late decision fails as `stale`. `proposeReplacement` is
 prepare → Gemini → stage. For TypeSafe Jev, the candidates map to a `choice` question's `criteria`
 (`{"take-1": words, …, "no-change": …, "review": …}`). Give the model only ids and words; keep `take`
-(ids and times) on this side. The Jev client, confidence threshold and FST are not in this module.
+(ids and times) on this side.
+
+**Jev decider:** `proposeReplacement({…, decide: jevDecide(proxy)})` asks TypeSafe Jev through the proxy's
+`POST /decide`. Jev sees the correction, the current take's words, and the other takes as named
+choices plus `no-change`/`review`. An answer below `minConfidence` (default 0.6) becomes `review`.
+The demo page uses Jev whenever `/health` reports `jev: true`, and Gemini otherwise.
+- **Verified 2026-10-10 (`jev-latest` → `jev-1.13.0`):** "our workshop" → take-2 (0.99), "less hesitant"
+  → the clean take (0.93), "fade to black" → review (0.96), each in about 0.2 s over the API.
+- **In the browser engine** (`foundation.mjs --creator --decider jev`, 2 runs): Jev chose "our workshop" at
+  0.97. The whole decision through to the preview took 252 / 288 ms (Gemini: 2.3–4.0 s). For the replayed TRIBE
+  event, Jev's confidence was 0.47 / 0.51, so the result was review and nothing changed.
+  All gates passed (21 chain + 15 foundation).
 
 Limitations: `project.inspect` does not expose source marks, so a replacement item with a source
 In mark stages a range other than the take. The staged-range check then cancels the preview. A

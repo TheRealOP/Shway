@@ -14,7 +14,8 @@ export interface ReplacementInput {
   transcript?: string;           // defaults to utterance.transcript.text
   context?: ReplacementContext;  // defaults to utterance.context (snapshot at push-to-talk start)
   takes: Take[];
-  generate: Generate;
+  generate?: Generate;           // Gemini picks by number; or
+  decide?: Decide;               // a decider picks an offered candidate id (jevDecide)
   adapter: Pick<ShwayAdapter, "inspect" | "preview" | "cancel">;
 }
 export type ReplacementResult =
@@ -156,19 +157,58 @@ export async function stageReplacement(prepared: PreparedReplacement, choice: st
   return {status: "preview", token: preview.token, label: preview.label, preview, explanation, from, take, proposal};
 }
 
-/** Gemini as the decider: prepare, pick one offered take by number, stage. */
+/** Chooses an offered candidate id, NO_CHANGE or REVIEW for a prepared replacement. */
+export type Decide = (prepared: PreparedReplacement) => Promise<{choice: string; explanation: string}>;
+
+/** Prepare, let `decide` (or Gemini via `generate`) pick one offered take, stage. */
 export async function proposeReplacement(input: ReplacementInput): Promise<ReplacementResult> {
+  if (!input.decide && !input.generate) throw new Error("proposeReplacement needs decide or generate");
   const prepared = await prepareReplacement(input);
   if (prepared.status !== "candidates") return prepared;
+  if (input.decide) {
+    const d = await input.decide(prepared);
+    return stageReplacement(prepared, d.choice, d.explanation, input.adapter);
+  }
   const {candidates} = prepared;
   // Takes go to the model as opaque indices with their words; never IDs or times.
   const prompt = `Spoken correction: ${JSON.stringify(prepared.correction)}\n\nTakes of the selected line:\n` +
     candidates.map((c, i) => `${i}${c.current ? " (current)" : ""}: ${JSON.stringify(c.words)}`).join("\n");
-  const answer = await input.generate({prompt, system: SYSTEM, schema: SCHEMA}) as {take?: unknown; explanation?: unknown} | null;
+  const answer = await input.generate!({prompt, system: SYSTEM, schema: SCHEMA}) as {take?: unknown; explanation?: unknown} | null;
   const n = answer?.take;
   const explanation = typeof answer?.explanation === "string" ? answer.explanation.trim().slice(0, 300) : "";
   const choice = n === -1 ? NO_CHANGE : safe(n) && n < candidates.length ? candidates[n].id : "";
   return stageReplacement(prepared, choice, explanation, input.adapter);
+}
+
+const JEV_INSTRUCTIONS = "The editor selected one take of a scripted line and gave a correction. Choose the alternative take that " +
+  "satisfies it, no-change if no listed take does, or review if the correction asks for something other than choosing a take or is unclear. " +
+  "Bracketed words such as [laughs] are non-speech sounds.";
+
+/**
+ * TypeSafe Jev as the decider, through the local proxy's POST /decide (the key stays there). Jev sees the
+ * correction, the current take's words and the other takes as named choices; never IDs or times.
+ * Below minConfidence the answer becomes REVIEW.
+ */
+export function jevDecide(base = "http://127.0.0.1:8790", {model = "jev-latest", minConfidence = 0.6} = {}): Decide {
+  // ponytail: one fixed confidence threshold; calibrate it against creator accept/reject logs (DEV-101).
+  return async prepared => {
+    const criteria: Record<string, string> = {};
+    for (const c of prepared.candidates) if (!c.current) criteria[c.id] = c.words;
+    criteria[NO_CHANGE] = "No listed take satisfies the correction.";
+    criteria[REVIEW] = "The correction asks for something other than choosing a take, or is unclear.";
+    const current = prepared.candidates.find(c => c.current)?.words ?? "";
+    const response = await fetch(`${base}/decide`, {method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify({
+      model, state: {correction: prepared.correction, current_take: current},
+      questions: {take: {type: "choice", instructions: JEV_INSTRUCTIONS, criteria}},
+    })});
+    const body = await response.json().catch(() => null);
+    const a = body?.answers?.take;
+    if (!response.ok || a?.type !== "choice" || typeof a.choice !== "string") throw new Error(`Jev: ${body?.error ?? response.status}`);
+    const confidence = typeof a.confidence === "number" ? a.confidence : 0;
+    const by = `Jev (${typeof body.model === "string" ? body.model : model}, confidence ${confidence.toFixed(2)})`;
+    if (!(confidence >= minConfidence)) return {choice: REVIEW, explanation: `${by} was unsure; nothing was changed.`};
+    return {choice: a.choice, explanation: a.choice === NO_CHANGE ? `${by}: no listed take fits.` : a.choice === REVIEW ? `${by}: this needs your review.` : `${by} chose this take.`};
+  };
 }
 
 /** A Generate backed by the local Gemini proxy (shway/gemini-server.mjs). */

@@ -6,16 +6,17 @@
 // index.html, and the Gemini proxy. A replayed sample TRIBE event then exercises the suggestion path.
 import {readFileSync} from "node:fs";
 
-export async function checkCreator({evaluate, item, transcriptPath, proxy}) {
+export async function checkCreator({evaluate, item, transcriptPath, proxy, decider = "gemini"}) {
   const transcript = JSON.parse(readFileSync(transcriptPath, "utf8"));
-  return evaluate(`(${browserScenario.toString()})(${JSON.stringify({item, transcript, proxy})})`, 300000);
+  return evaluate(`(${browserScenario.toString()})(${JSON.stringify({item, transcript, proxy, decider})})`, 300000);
 }
 
-async function browserScenario({item, transcript, proxy}) {
+async function browserScenario({item, transcript, proxy, decider}) {
   const {ShwayAdapter} = await import('/adapter.js');
   const {parseTranscript, indexTakes} = await import('/takes.js');
   const {parseBrief, planFirstCut, assembleFirstCut, proxyGenerate} = await import('/firstcut.js');
-  const {proposeReplacement, prepareReplacement, stageReplacement, geminiGenerate} = await import('/replace.js');
+  const {proposeReplacement, prepareReplacement, stageReplacement, geminiGenerate, jevDecide} = await import('/replace.js');
+  const choose = {generate: geminiGenerate(proxy), decide: decider === 'jev' ? jevDecide(proxy) : undefined};
   const gates = {};
   function check(name, condition, detail) {
     gates[name] = Boolean(condition);
@@ -57,7 +58,7 @@ async function browserScenario({item, transcript, proxy}) {
   const wantOur = !/\bour\b/i.test(text(plan.choices[0].take));
   const correction = wantOur ? 'I prefer the take where I say "our workshop".' : 'Say "the workshop", not "our workshop", and keep it clean with no filler.';
   started = performance.now();
-  const r = await proposeReplacement({transcript: correction, context, takes, generate: geminiGenerate(proxy), adapter});
+  const r = await proposeReplacement({transcript: correction, context, takes, ...choose, adapter});
   const replaceMs = performance.now() - started;
   check('replacementPreview', r.status === 'preview', r);
   check('chosenRequestedTake', wantOur ? /\bour\b/i.test(text(r.take)) : !/\b(our|uh|um)\b/i.test(text(r.take)), text(r.take));
@@ -86,7 +87,7 @@ async function browserScenario({item, transcript, proxy}) {
   check('tribeDuplicateDropped', tribeGate.check({...event, id: 'replayed-2'}, now).drop === 'duplicate');
   started = performance.now();
   const ask = {transcript: tribeCorrection(g.event, brief.feeling), takes, adapter, context: {revision: event.revision, sequence: event.sequence, selection: [line2.clip]}};
-  const t = await proposeReplacement({...ask, generate: geminiGenerate(proxy)}); // live decider: may rightly decline
+  const t = await proposeReplacement({...ask, ...choose}); // live decider: may rightly decline
   const tribeMs = performance.now() - started;
   if (t.status === 'preview') await adapter.cancel(t.token);
   // Fixed decider by candidate id (the Jev path) so the suggestion branch always runs in the engine.
@@ -111,7 +112,7 @@ async function browserScenario({item, transcript, proxy}) {
   const tribe = {event, live: {outcome: t.status, to: t.status === 'preview' ? text(t.take) : null, message: t.message ?? t.explanation, ms: tribeMs},
     fixed: {candidates: prepared.candidates.map(c => [c.id, c.words, c.current]), picked: pick.id}};
 
-  return {ok: true, gates, planMs, replaceMs, takes: takes.map(t => ({statementIndex: t.statementIndex, text: text(t), score: t.score})),
+  return {ok: true, decider, gates, planMs, replaceMs, takes: takes.map(t => ({statementIndex: t.statementIndex, text: text(t), score: t.score})),
     firstCut: plan.choices.map(c => ({statementIndex: c.statementIndex, take: text(c.take), reason: c.reason})),
     replacement: {correction, from: text(r.from), to: text(r.take), explanation: r.explanation, label: r.label},
     tribe, expectedSpeech: [text(r.take), text(plan.choices[1].take)], history: finalHistory};

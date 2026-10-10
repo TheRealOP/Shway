@@ -153,6 +153,7 @@
     <dl>
       <dt>editor</dt><dd id="editor">loading…</dd>
       <dt>Gemini</dt><dd id="gemini">checking…</dd>
+      <dt>Jev</dt><dd id="jev">checking…</dd>
     </dl>
     <table aria-label="Panel keys and gestures">
       <tr><td><kbd>A</kbd> / double tap*</td><td>accept preview</td></tr>
@@ -175,6 +176,8 @@ import { openMic, createCapture } from "./voice/mic.mjs";
 import { createHoldToTalk, readBrief, createProposals, loadHook, createTribeGate, clipAt, tribeCorrection } from "./demo.mjs";
 
 const GEMINI = "http://127.0.0.1:8790";
+let jevOn = false; // set from the proxy's /health: Jev decides replacements when JEV_KEY is configured
+const decider = (m) => ({ generate: m.geminiGenerate(GEMINI), decide: jevOn && m.jevDecide ? m.jevDecide(GEMINI) : undefined });
 const $ = (id) => document.getElementById(id);
 const frame = $("ed");
 const keys = { key: false, fine: false, cancel: false };
@@ -250,7 +253,7 @@ async function utterance(u) {
     if (!u.transcript) { note("Transcribing…"); u.transcript = await transcribe(u.audio, GEMINI); said(); }
     if (proposals.pending) await proposals.reject(); // the engine stages one preview at a time; new creator input wins
     note("Proposing a replacement…");
-    const r = await proposeReplacement({ utterance: u, takes: idx.takes, generate: geminiGenerate(GEMINI), adapter: need() });
+    const r = await proposeReplacement({ utterance: u, takes: idx.takes, ...decider(hook.module), adapter: need() });
     if (r?.status !== "preview") return note(r?.message ?? `Replacement: ${r?.status ?? "no result"}`);
     note(r.explanation ?? "");
     await proposals.show(r);
@@ -287,7 +290,7 @@ async function onTribe(raw) {
     if (idx.error) return note(`TRIBE suggestion needs the takes (Story brief): ${idx.error}`);
     note("Looking for a better-fitting take…");
     const r = await hook.module.proposeReplacement({ transcript: tribeCorrection(g.event, idx.brief.feeling), takes: idx.takes,
-      context: { revision: g.event.revision, sequence: g.event.sequence, selection: [clip] }, generate: hook.module.geminiGenerate(GEMINI), adapter: need() });
+      context: { revision: g.event.revision, sequence: g.event.sequence, selection: [clip] }, ...decider(hook.module), adapter: need() });
     if (r?.status !== "preview") return note(`No suggestion: ${r?.message ?? r?.status}`);
     note(r.explanation ?? "");
     await proposals.show({ ...r, source: "tribe" });
@@ -429,6 +432,8 @@ async function gemini() {
     const r = await fetch(`${GEMINI}/health`);
     const b = await r.json();
     $("gemini").textContent = b.ok ? `ok (${b.model})` : `not ok (${r.status})`;
+    jevOn = b.ok && b.jev === true;
+    $("jev").textContent = jevOn ? "on: picks takes for corrections and TRIBE suggestions" : "off (no JEV_KEY): Gemini picks";
   } catch { $("gemini").textContent = "offline: run node shway/gemini-server.mjs --port 8790"; }
 }
 gemini(); setInterval(gemini, 10000);

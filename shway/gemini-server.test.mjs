@@ -5,14 +5,14 @@ import { parseEnv, allowedOrigin, buildRequest, createGeminiServer } from "./gem
 
 const KEY = "test-key-123";
 
-async function serve(reply = { status: 200, body: { candidates: [{ content: { parts: [{ text: "hi" }] } }], usageMetadata: { totalTokenCount: 3 } } }) {
+async function serve(reply = { status: 200, body: { candidates: [{ content: { parts: [{ text: "hi" }] } }], usageMetadata: { totalTokenCount: 3 } } }, opts = {}) {
   const seen = [];
   const fake = async (url, init) => {
     seen.push({ url, init, body: JSON.parse(init.body) });
     const r = typeof reply === "function" ? reply() : reply;
     return { ok: r.status < 400, status: r.status, json: async () => r.body };
   };
-  const server = createGeminiServer({ key: KEY, fetch: fake });
+  const server = createGeminiServer({ key: KEY, fetch: fake, ...opts });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   const base = `http://127.0.0.1:${server.address().port}`;
   const call = (path, { body, headers = {}, method = "POST" } = {}) =>
@@ -97,7 +97,7 @@ test("local pages get CORS headers; health reports the model, not the key", asyn
   assert.equal(pre.status, 204);
   assert.equal(pre.headers.get("access-control-allow-origin"), "http://localhost:8772");
   const h = await s.call("/health", { method: "GET", headers: { origin: "http://localhost:8772" } });
-  assert.deepEqual(h.json, { ok: true, model: "gemini-3.8-flash" });
+  assert.deepEqual(h.json, { ok: true, model: "gemini-3.8-flash", jev: false });
   assert.ok(!JSON.stringify(h.json).includes(KEY));
   await s.close();
 });
@@ -128,5 +128,36 @@ test("transcribe rejects bad audio requests before calling Gemini; only it gets 
   assert.equal((await s.call("/transcribe", { body: { mimeType: "audio/wav", data: big } })).status, 200);
   assert.equal((await s.call("/transcribe", { body: { mimeType: "audio/wav", data: "AAAA" }, headers: { origin: "https://evil.example" } })).status, 403);
   assert.equal(s.seen.length, 1);
+  await s.close();
+});
+
+const JEV = "jev-secret-456";
+const QUESTION = { take: { type: "choice", instructions: "Pick.", criteria: { "take-1": "a", "no-change": "none" } } };
+test("decide forwards a bounded Jev question with a bearer key and returns its answers", async () => {
+  const s = await serve({ status: 200, body: { model: "jev-1.13.0", answers: { take: { type: "choice", choice: "take-1", confidence: 0.9, probabilities: {} } }, usage: { input_tokens: 1 } } }, { jevKey: JEV });
+  const r = await s.call("/decide", { body: { state: { correction: "x" }, questions: QUESTION } });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.answers.take.choice, "take-1");
+  assert.equal(s.seen[0].url, "https://api.typesafe.ai/v1/systemone");
+  assert.equal(s.seen[0].init.headers.authorization, `Bearer ${JEV}`);
+  assert.deepEqual(s.seen[0].body, { model: "jev-latest", state: { correction: "x" }, questions: QUESTION });
+  for (const bad of [{ questions: QUESTION }, { state: 1, questions: {} }, { state: 1, questions: { q: { type: "free" } } },
+    { state: 1, questions: QUESTION, model: "gpt-5" }, { state: 1, questions: QUESTION, extra: 1 }]) {
+    assert.equal((await s.call("/decide", { body: bad })).status, 400, JSON.stringify(bad));
+  }
+  assert.equal(s.seen.length, 1);
+  assert.equal((await s.call("/health", { method: "GET" })).json.jev, true);
+  await s.close();
+});
+
+test("decide is off without a key, and upstream errors never contain it", async () => {
+  const off = await serve();
+  assert.equal((await off.call("/decide", { body: { state: 1, questions: QUESTION } })).status, 503);
+  assert.equal(off.seen.length, 0);
+  await off.close();
+  const s = await serve({ status: 401, body: { detail: `bad token ${JEV}` } }, { jevKey: JEV });
+  const r = await s.call("/decide", { body: { state: 1, questions: QUESTION } });
+  assert.equal(r.status, 502);
+  assert.ok(!JSON.stringify(r.json).includes(JEV), r.json.error);
   await s.close();
 });

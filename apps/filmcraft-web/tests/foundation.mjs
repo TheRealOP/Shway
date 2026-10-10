@@ -2,7 +2,7 @@
 // Serve a generated H.264/AAC MP4 next to index.html; do not commit fixtures.
 // node apps/filmcraft-web/tests/foundation.mjs --url http://127.0.0.1:8765/ --media web-test.mp4 --out /tmp/fc-foundation
 // Verifies same-page save/reopen; OPFS recovery across reload is a separate gate.
-// --creator --transcript <word-timed JSON> [--proxy http://127.0.0.1:8790]: replace the synthetic trim
+// --creator --transcript <word-timed JSON> [--proxy http://127.0.0.1:8790] [--decider gemini|jev]: replace the synthetic trim
 // with the AI first cut + replacement chain (creator.mjs), then save/reopen/export that result.
 import assert from "node:assert/strict";
 import {checkProposals} from "./proposals.mjs";
@@ -205,7 +205,7 @@ try {
 
   let accepted;
   if (process.argv.includes("--creator")) {
-    report.steps.creator = await checkCreator({evaluate, item: report.steps.import.items[0], transcriptPath: arg("transcript"), proxy: arg("proxy", "http://127.0.0.1:8790")});
+    report.steps.creator = await checkCreator({evaluate, item: report.steps.import.items[0], transcriptPath: arg("transcript"), proxy: arg("proxy", "http://127.0.0.1:8790"), decider: arg("decider", "gemini")});
     gate("creatorChain", report.steps.creator.ok, report.steps.creator);
     accepted = await execute("sequence.inspect");
     report.steps.creator.screenshot = await screenshot("02-creator-cut");
