@@ -52,7 +52,9 @@ The panel loads these modules from the dist root. When a module is missing, it s
   per line) and transcript JSON files go to `indexTakes`, then
   `planFirstCut({brief, script, takes, generate})`, then `assembleFirstCut(adapter, plan)`. The plan's
   reasons are listed. A result with a `token` goes to the preview bar; any other result counts as
-  already applied, and Undo reverts it.
+  already applied, and Undo reverts it. `assembleFirstCut` always returns a preview with a token and
+  appends after existing content. So make an empty sequence active first. The editor build must include
+  `timeline.place` (DEV-90), and `shway/build.mjs` must emit `firstcut.js` (branch `claude/dev-89-ai-first-cut`).
 - **Replacement:** `replace.js` (`shway/replace.ts`) must export `proposeReplacement`, `geminiGenerate`
   and `transcribe`. It runs for every finished utterance, spoken or typed in the "type what you'd say"
   field. A spoken utterance is first transcribed (`transcribe(audio, proxy)`, which needs the proxy's
