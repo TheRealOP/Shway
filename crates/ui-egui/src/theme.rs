@@ -265,7 +265,7 @@ impl Tokens {
             danger: Color32::from_rgb(0xf0, 0x60, 0x5a),
             radius: 8.0,
             radius_sm: 6.0,
-            gap: 6.0,
+            gap: 4.0,
             tab_h: 32.0,
         }
     }
@@ -433,9 +433,10 @@ pub fn apply_visuals(ctx: &egui::Context, t: &Tokens) {
     }
     ctx.set_visuals(v);
     ctx.global_style_mut(|s| {
-        s.spacing.item_spacing = if shway { egui::vec2(8.0, 6.0) } else { egui::vec2(6.0, 4.0) };
-        s.spacing.button_padding = if shway { egui::vec2(10.0, 4.0) } else { egui::vec2(8.0, 3.0) };
-        s.spacing.interact_size.y = if shway { 26.0 } else { 24.0 };
+        // Shway breathes sideways only: panels, menus and tests are laid out for 24 px rows
+        s.spacing.item_spacing = if shway { egui::vec2(8.0, 4.0) } else { egui::vec2(6.0, 4.0) };
+        s.spacing.button_padding = if shway { egui::vec2(10.0, 3.0) } else { egui::vec2(8.0, 3.0) };
+        s.spacing.interact_size.y = 24.0;
         s.spacing.menu_margin = egui::Margin::same(if shway { 6 } else { 4 });
         s.text_styles.insert(TextStyle::Body, FontId::new(12.0, FontFamily::Proportional));
         s.text_styles.insert(TextStyle::Button, FontId::new(12.0, FontFamily::Proportional));
