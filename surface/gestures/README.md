@@ -7,7 +7,7 @@ Contract: [interactions](../../docs/wiki/interactions.md).
 | --- | --- |
 | `recognizer.mjs` | Pure, deterministic recognizer (`createRecognizer`, `replay`). Runs in Node and browsers, no build step. |
 | `recognizer.test.mjs` | Replay tests: `node --test surface/gestures/recognizer.test.mjs` (Node ≥ 22, no packages). |
-| `camera.html` | Camera harness: MediaPipe Hand Landmarker → recognizer → state/latency display, trace recorder (R). |
+| `camera.html` | Camera harness: MediaPipe Hand Landmarker → recognizer → hand overlay (skeleton, pinch meter, twist dial with dead zone/speed bands/fine detents, swipe flash), latency, trace recorder (R). |
 | `traces/*.json` | Recorded traces (none yet). Every file is replayed by the tests; names starting `rest` must emit nothing. |
 
 The directory sits outside `apps/` because `apps/*` is a Cargo workspace glob.

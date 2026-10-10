@@ -100,6 +100,7 @@ export function createRecognizer(config = {}) {
   let cooldownUntil = -Infinity;
   /** @type {{t: number, x: number, y: number}[]} */ let track = [];
   let confidence = 0;
+  let pinchRatio = Infinity; // last thumb–index / palm ratio, for feedback
 
   /** @param {GestureEvent[]} out @param {number} t */
   const stop = (out, t) => {
@@ -131,9 +132,11 @@ export function createRecognizer(config = {}) {
     if (h) {
       const palm = len(sub(h.world[MIDDLE_MCP], h.world[WRIST]));
       const pinch = len(sub(h.world[THUMB_TIP], h.world[INDEX_TIP])) / palm;
+      pinchRatio = pinch;
       pinching = pinching ? pinch < c.pinchOff : pinch < c.pinchOn;
     } else {
       pinching = false;
+      pinchRatio = Infinity;
     }
     const engage = Boolean(f.key) || pinching;
 
@@ -224,7 +227,7 @@ export function createRecognizer(config = {}) {
   }
 
   /** UI snapshot: mode, effect and confidence must stay visible. */
-  const view = () => ({ state, rate, fine, angleDeg: angle, handedness, confidence, pinching });
+  const view = () => ({ state, rate, fine, angleDeg: angle, handedness, confidence, pinching, pinchRatio });
 
   return { step, view };
 }
