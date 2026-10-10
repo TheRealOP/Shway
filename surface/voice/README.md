@@ -7,6 +7,7 @@ speech-to-text provider. Contract: [interactions](../../docs/wiki/interactions.m
 | --- | --- |
 | `utterance.mjs` | Pure, deterministic utterance state (`createVoice`). Runs in Node and browsers, no build step. |
 | `utterance.test.mjs` | Replay tests: `node --test surface/voice/utterance.test.mjs` (Node ≥ 22, no packages). |
+| `mic.mjs` | Browser-only microphone open and one-`MediaRecorder`-per-utterance capture, shared by `voice.html` and `../demo.html`. |
 | `voice.html` | Microphone harness: hold V or the button, recording indicator + level meter, utterance list with playback. |
 
 Serve on localhost (the microphone needs a secure context):

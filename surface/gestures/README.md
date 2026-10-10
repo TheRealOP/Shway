@@ -8,6 +8,7 @@ Contract: [interactions](../../docs/wiki/interactions.md).
 | `recognizer.mjs` | Pure, deterministic recognizer (`createRecognizer`, `replay`). Runs in Node and browsers, no build step. |
 | `recognizer.test.mjs` | Replay tests: `node --test surface/gestures/*.test.mjs` (Node ≥ 22, no packages). |
 | `camera.html` | Camera harness: MediaPipe Hand Landmarker → recognizer → hand overlay (skeleton, pinch meter, twist dial with dead zone/speed bands/fine detents, tap dot, chop-ready blade line, gesture flash), latency, trace recorder (R). |
+| `hands.mjs` | Browser-only camera open, MediaPipe loop and overlay drawing, shared by `camera.html` and `../demo.html`. |
 | `bridge.mjs` | Gesture events → `shway/adapter.ts` calls (serialized, latest-wins shuttle). Tests: `bridge.test.mjs`. |
 | `traces/*.json` | Recorded traces (none yet). Every file is replayed by the tests; names starting `rest` must emit nothing. |
 
@@ -59,10 +60,9 @@ and the queue carries on.
 | `chop` | `cut()` (`sequence.addEdit`: one undo step) |
 | `double-tap` | `togglePlay()` (`ui.playback toggle`) |
 
-Run it against the real editor: build the web app (`cargo xtask web`, see [web](../../docs/web.md)), then
-`node shway/build.mjs --out <dist>`, copy `recognizer.mjs`, `bridge.mjs` and `camera.html` into `<dist>`,
-serve it, and open `camera.html?editor`. The editor loads in a same-origin iframe; the camera panel
-floats in the corner.
+Run it against the real editor with the demo page: `node surface/build-demo.mjs <editor dist> --out target/demo`,
+serve it, and open `demo.html` (see [surface](../README.md)). `camera.html?editor` still works when
+`camera.html`, `recognizer.mjs`, `hands.mjs` and `bridge.mjs` sit flat beside the editor's `index.html` and `adapter.js`.
 
 **Verified 2026-10-10** (browser pane, PR #2 engine build, demo project, synthetic events, no camera):
 - Shuttle 2×: the playhead moved 3.0 s in 1.5 s. Stop works.
