@@ -52,6 +52,11 @@ One continuous adjustment commits once and undoes once.
 Measure p95 gesture-to-visible-feedback latency, aiming below 150 ms on demo hardware.
 Measure actual latency rather than advertising the target as a result.
 
+**Status 2026-10-10:** recognition slice (engage, twist shuttle/fine step, swipe, loss/cancel latch)
+is implemented in [surface/gestures](../../surface/gestures/README.md). It passes synthetic replay tests.
+Live camera tracking, editor integration and latency are not yet verified.
+The README holds the event boundary for the adapter.
+
 ## Related pages
 
 [Wiki map](README.md) · [Architecture](architecture.md) · [Adaptation](adaptation.md) · [Acceptance](acceptance.md)
