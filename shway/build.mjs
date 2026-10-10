@@ -1,4 +1,4 @@
-// Node >=26. Emits dependency-free browser ESM (adapter.js + takes.js) into an ignored target/ or dist/ directory.
+// Node >=26. Emits dependency-free browser ESM (adapter.js, takes.js, firstcut.js) into an ignored target/ or dist/ directory.
 // node shway/build.mjs --out target/agent-foundation/web/dist
 import {stripTypeScriptTypes} from "node:module";
 import {readFile, writeFile, mkdir} from "node:fs/promises";
@@ -12,7 +12,7 @@ const out = resolve(process.argv[index + 1]);
 const rel = relative(root, out);
 if (!["target", "dist"].some(name => rel === name || rel.startsWith(name + sep))) throw new Error("Output must be inside this checkout's ignored target/ or dist/ directory");
 await mkdir(out, {recursive: true});
-for (const name of ["takes", "adapter"]) {
+for (const name of ["takes", "adapter", "firstcut"]) {
   const source = await readFile(new URL(`./${name}.ts`, import.meta.url), "utf8");
   // Browser ESM resolves the sibling emitted module, not its TypeScript source.
   const javascript = stripTypeScriptTypes(source, {mode: "strip"}).replaceAll('from "./takes.ts"', 'from "./takes.js"');
