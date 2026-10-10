@@ -511,3 +511,205 @@ fn assembly_rejects_offline_sources_and_locked_targets() {
         assert!(s.proposal.is_none());
     }
 }
+
+/// Four committed, contiguous linked A/V clips of 8, 5, 3 and 6 frames: [(picture, sound); 4].
+fn cut_fixture() -> (Session, [(u64, u64); 4], i64) {
+    let (mut s, a, b, f) = assembly_fixture();
+    let ranges = json!([
+        {"item":a,"sourceIn":0,"sourceOut":8*f},
+        {"item":b,"sourceIn":0,"sourceOut":5*f},
+        {"item":a,"sourceIn":20*f,"sourceOut":23*f},
+        {"item":b,"sourceIn":10*f,"sourceOut":16*f},
+    ]);
+    let p = assemble(&s, ranges);
+    let token = run(&mut s, p);
+    s.execute("proposal.commit", json!({"token":token})).unwrap();
+    let q = s.active_sequence().unwrap();
+    let pairs = [0, 1, 2, 3].map(|n| (q.video_tracks[0].items[n].id.0, q.audio_tracks[0].items[n].id.0));
+    (s, pairs, f)
+}
+
+fn edit(s: &Session, steps: Value) -> Value {
+    json!({"expectedRevision":s.revision,"sequence":s.state.active_sequence.unwrap().0,"label":"Tighten cut","steps":steps})
+}
+
+fn remove(clips: &[u64]) -> Value {
+    json!({"command":"timeline.remove","params":{"clips":clips}})
+}
+
+fn rearrange(clip: u64, anchor: u64, position: &str) -> Value {
+    json!({"command":"timeline.move","params":{"clip":clip,"anchor":anchor,"position":position}})
+}
+
+/// (id, start) on V1 and A1 in time order, and whether each picture shares link and range with
+/// the sound at the same index.
+fn layout(s: &Session) -> (Vec<(u64, i64)>, Vec<(u64, i64)>, bool) {
+    let q = s.active_sequence().unwrap();
+    q.check().unwrap();
+    let row = |t: &filmcraft_project::Track| t.items.iter().map(|i| (i.id.0, i.start.0)).collect::<Vec<_>>();
+    let (v, a) = (&q.video_tracks[0].items, &q.audio_tracks[0].items);
+    let synced = v.len() == a.len() && v.iter().zip(a).all(|(v, a)| v.link.is_some() && v.link == a.link && v.range() == a.range());
+    (row(&q.video_tracks[0]), row(&q.audio_tracks[0]), synced)
+}
+
+fn ids(row: &[(u64, i64)]) -> Vec<u64> {
+    row.iter().map(|c| c.0).collect()
+}
+
+#[test]
+fn remove_ripples_linked_pairs_and_commits_as_one_undo_step() {
+    for (victims, kept, closed) in [(vec![1usize], vec![0usize, 2, 3], 5), (vec![0, 2], vec![1, 3], 11)] {
+        let (mut s, pairs, f) = cut_fixture();
+        let base = s.project.clone();
+        let undo = s.history.undo.len();
+        let length = s.active_sequence().unwrap().duration().0;
+        // Naming only the picture removes its sound too.
+        let named: Vec<u64> = victims.iter().map(|n| pairs[*n].0).collect();
+        let p = edit(&s, json!([remove(&named)]));
+        let token = run(&mut s, p);
+        assert!(Arc::ptr_eq(&s.project, &base), "staged only");
+        let preview = s.execute("proposal.inspect", json!({"token":token})).unwrap();
+        assert_eq!(preview["results"][0]["closed"], closed * f);
+        assert_eq!(preview["results"][0]["removed"].as_array().unwrap().len(), 2 * victims.len());
+        s.execute("proposal.commit", json!({"token":token})).unwrap();
+        assert_eq!(s.history.undo.len(), undo + 1);
+        let (v, a, synced) = layout(&s);
+        assert!(synced);
+        assert_eq!(ids(&v), kept.iter().map(|n| pairs[*n].0).collect::<Vec<_>>());
+        assert_eq!(ids(&a), kept.iter().map(|n| pairs[*n].1).collect::<Vec<_>>());
+        let q = s.active_sequence().unwrap();
+        assert_eq!(q.video_tracks[0].items[0].start.0, 0);
+        assert!(q.video_tracks[0].items.windows(2).all(|w| w[0].end() == w[1].start), "gap closed");
+        assert_eq!(q.duration().0, length - closed * f);
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(*s.project, *base);
+    }
+}
+
+#[test]
+fn remove_and_move_cancel_leaves_timeline_untouched() {
+    let (mut s, pairs, _) = cut_fixture();
+    let base = s.project.clone();
+    let (undo, revision) = (s.history.undo.clone(), s.revision);
+    let p = edit(&s, json!([remove(&[pairs[0].0]), rearrange(pairs[3].0, pairs[1].0, "before")]));
+    let token = run(&mut s, p);
+    s.execute("proposal.cancel", json!({"token":token})).unwrap();
+    assert!(Arc::ptr_eq(&s.project, &base));
+    assert_eq!((s.history.undo.clone(), s.revision), (undo, revision));
+    assert!(s.proposal.is_none());
+}
+
+#[test]
+fn move_reorders_linked_pairs_both_directions_without_gaps() {
+    // (clip, anchor, position) -> resulting order of the four pairs.
+    for (clip, anchor, position, order) in
+        [(0, 2, "after", [1, 2, 0, 3]), (3, 0, "before", [3, 0, 1, 2]), (1, 3, "after", [0, 2, 3, 1]), (2, 1, "before", [0, 2, 1, 3])]
+    {
+        let (mut s, pairs, _) = cut_fixture();
+        let base = s.project.clone();
+        let undo = s.history.undo.len();
+        let length = s.active_sequence().unwrap().duration();
+        let p = edit(&s, json!([rearrange(pairs[clip].0, pairs[anchor].0, position)]));
+        let token = run(&mut s, p);
+        assert!(Arc::ptr_eq(&s.project, &base));
+        s.execute("proposal.commit", json!({"token":token})).unwrap();
+        assert_eq!(s.history.undo.len(), undo + 1);
+        let (v, a, synced) = layout(&s);
+        assert!(synced, "{clip} {position} {anchor}");
+        assert_eq!(ids(&v), order.map(|n| pairs[n].0).to_vec(), "{clip} {position} {anchor}");
+        assert_eq!(ids(&a), order.map(|n| pairs[n].1).to_vec());
+        let q = s.active_sequence().unwrap();
+        assert_eq!(q.video_tracks[0].items[0].start.0, 0);
+        assert!(q.video_tracks[0].items.windows(2).all(|w| w[0].end() == w[1].start));
+        assert_eq!(q.duration(), length);
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(*s.project, *base);
+    }
+}
+
+#[test]
+fn move_then_trim_and_remove_combine_into_one_undo_step() {
+    let (mut s, pairs, f) = cut_fixture();
+    let base = s.project.clone();
+    let undo = s.history.undo.len();
+    let source = s.active_sequence().unwrap().find_item(ClipId(pairs[3].0)).unwrap().1.item.0;
+    let trim = json!({"command":"timeline.trim","params":{"clip":pairs[3].0,"source":source,"edge":"out","mode":"ripple","deltaFrames":-2}});
+    // Remove names the sound only; its picture goes with it.
+    let p = edit(&s, json!([rearrange(pairs[3].0, pairs[0].0, "before"), trim, remove(&[pairs[2].1])]));
+    let token = run(&mut s, p);
+    s.execute("proposal.commit", json!({"token":token})).unwrap();
+    assert_eq!(s.history.undo.len(), undo + 1);
+    let (v, _, synced) = layout(&s);
+    assert!(synced);
+    assert_eq!(v, vec![(pairs[3].0, 0), (pairs[0].0, 4 * f), (pairs[1].0, 12 * f)]);
+    assert_eq!(s.active_sequence().unwrap().duration().0, 17 * f);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(*s.project, *base);
+}
+
+#[test]
+fn hostile_remove_and_move_steps_are_rejected_without_a_candidate() {
+    let (mut s, pairs, f) = cut_fixture();
+    let (p0, p1, p3) = (pairs[0].0, pairs[1].0, pairs[3].0);
+    // A clip on a second sequence is outside the proposal's sequence.
+    let seq = s.state.active_sequence.unwrap();
+    let source = s.active_sequence().unwrap().video_tracks[0].items[0].item.0;
+    s.execute("file.newSequence", json!({"name":"Other","width":64,"height":36})).unwrap();
+    s.execute("timeline.place", json!({"item":source,"frame":0,"duration":4 * f})).unwrap();
+    let foreign = s.active_sequence().unwrap().video_tracks[0].items[0].id.0;
+    s.execute("sequence.open", json!({"item":seq.0})).unwrap();
+    assert_eq!(s.state.active_sequence, Some(seq));
+    let cases = [
+        ("empty", json!([remove(&[])]), "need 1–32"),
+        ("duplicate", json!([remove(&[p0, p0])]), "duplicate"),
+        ("unknown", json!([remove(&[999_999])]), "missing clip"),
+        ("foreign", json!([remove(&[foreign])]), "missing clip"),
+        ("zero", json!([remove(&[0])]), "positive exact"),
+        ("too many", json!([remove(&vec![p0; 33])]), "32 explicit target references"),
+        ("unknown field", json!([{"command":"timeline.remove","params":{"clips":[p0],"gap":true}}]), "invalid parameters"),
+        ("same", json!([rearrange(p0, p0, "after")]), "must differ"),
+        ("partner anchor", json!([rearrange(p0, pairs[0].1, "after")]), "linked to the moved clip"),
+        ("other track", json!([rearrange(p0, pairs[2].1, "after")]), "moved clip's track"),
+        ("unknown clip", json!([rearrange(999_999, p0, "after")]), "missing clip"),
+        ("unknown anchor", json!([rearrange(p0, 999_999, "after")]), "missing clip"),
+        ("zero anchor", json!([rearrange(p0, 0, "after")]), "positive exact"),
+        ("no-op", json!([rearrange(p0, p1, "before")]), "already plays there"),
+        ("no-op after", json!([rearrange(p1, p0, "after")]), "already plays there"),
+        ("position", json!([rearrange(p0, p3, "over")]), "invalid parameters"),
+        ("second fails", json!([rearrange(p3, p0, "before"), remove(&[999_999])]), "missing clip"),
+    ];
+    let base = s.project.clone();
+    let history = s.history.undo.clone();
+    for (name, steps, expected) in cases {
+        let error = s.execute("proposal.preview", edit(&s, steps)).unwrap_err().to_string();
+        assert!(error.contains(expected), "{name}: {error}");
+        assert!(Arc::ptr_eq(&s.project, &base), "{name}");
+        assert_eq!(s.history.undo, history, "{name}");
+        assert!(s.proposal.is_none(), "{name}");
+    }
+    let mut stale = edit(&s, json!([remove(&[p0])]));
+    stale["expectedRevision"] = json!(s.revision - 1);
+    assert!(s.execute("proposal.preview", stale).unwrap_err().to_string().contains("stale revision"));
+}
+
+#[test]
+fn move_that_would_close_a_foreign_gap_or_split_sync_locked_music_is_rejected() {
+    // A gap after the moved clip would close along with the hole it leaves.
+    let (mut s, pairs, f) = cut_fixture();
+    s.execute("timeline.move", json!({"moves":[{"clip":pairs[3].0,"track":"V1","time":30 * f}],"linked":true})).unwrap();
+    let base = s.project.clone();
+    let error = s.execute("proposal.preview", edit(&s, json!([rearrange(pairs[2].0, pairs[3].0, "after")]))).unwrap_err().to_string();
+    assert!(error.contains("re-plan"), "{error}");
+    assert!(Arc::ptr_eq(&s.project, &base));
+    // Music under the cut on a sync-locked track cannot follow a rearrangement.
+    let (mut s, pairs, f) = cut_fixture();
+    let source = s.active_sequence().unwrap().audio_tracks[0].items[0].item.0;
+    s.execute("sequence.addTracks", json!({"video":0,"audio":1})).unwrap();
+    let music = s.active_sequence().unwrap().audio_tracks.last().unwrap().id.0;
+    s.execute("timeline.place", json!({"item":source,"track":music,"time":0,"video":false,"audio":true,"duration":22 * f})).unwrap();
+    assert_eq!(s.active_sequence().unwrap().audio_tracks.last().unwrap().items.len(), 1);
+    let base = s.project.clone();
+    assert!(s.execute("proposal.preview", edit(&s, json!([rearrange(pairs[0].0, pairs[2].0, "after")]))).is_err());
+    assert!(Arc::ptr_eq(&s.project, &base));
+    assert!(s.proposal.is_none());
+}

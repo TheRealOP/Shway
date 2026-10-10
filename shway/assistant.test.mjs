@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer as tcp } from "node:net";
 import { createServer as http } from "node:http";
-import { createAssistant, validateAction } from "./assistant.mjs";
+import { createAssistant, fit, validateAction } from "./assistant.mjs";
 
 const TPS = 254016000000, F = TPS / 30;
 const REQUIRED = ["project.inspect", "sequence.inspect", "timeline.select", "playhead.set", "edit.undo", "file.exportMedia", "jobs.list",
@@ -147,16 +147,39 @@ test("a newer message cancels the older pending preview first", async (t) => {
   assert.equal(s.editor.previews.length, 2);
 });
 
-test("remove and move are validated, then refused: the proposal boundary has no delete or move step", async (t) => {
+test("remove and move preview exact proposal steps; accept commits one step, reject cancels", async (t) => {
   const s = await setup(); t.after(s.close);
   s.proxy.answers.push({ action: "remove", reply: "Removing the Chili's clip.", clips: [12] });
   let r = await s.call("/chat", { message: "remove the Chili's part" });
-  assert.match(r.body.reply, /remove C5517\.MP4.*isn't supported.*Nothing changed/);
-  assert.equal(r.body.pending, null);
+  assert.equal(r.body.reply, "Removing the Chili's clip. Preview ready: accept to apply it, or reject.");
+  assert.deepEqual(s.editor.previews[0], { expectedRevision: 5, sequence: 27, label: "Remove C5517.MP4",
+    steps: [{ command: "timeline.remove", params: { clips: [12] } }] });
+  r = await s.call("/chat/accept", {});
+  assert.deepEqual(s.editor.history, ["Remove C5517.MP4"]);
   s.proxy.answers.push({ action: "move", reply: "Moving.", clip: 12, target: 10, position: "before" });
   r = await s.call("/chat", { message: "put the Chili's part first" });
-  assert.match(r.body.reply, /move C5517\.MP4 before C5500\.MP4.*isn't supported/);
-  assert.equal(s.editor.previews.length, 0);
+  assert.deepEqual(s.editor.previews[1], { expectedRevision: 6, sequence: 27, label: "Move C5517.MP4 before C5500.MP4",
+    steps: [{ command: "timeline.move", params: { clip: 12, anchor: 10, position: "before" } }] });
+  r = await s.call("/chat/reject", {});
+  assert.equal(s.editor.proposal, null);
+  assert.equal(s.editor.history.length, 1);
+});
+
+test("an engine refusal of a remove or move is reported and leaves nothing pending", async (t) => {
+  const s = await setup(); t.after(s.close);
+  s.editor.onPreview = () => { throw new Error("edit proposal: move cannot ripple every affected track identically (sync lock, gap or partner); re-plan"); };
+  s.proxy.answers.push({ action: "move", reply: "Moving.", clip: 10, target: 12, position: "after" });
+  const r = await s.call("/chat", { message: "put the first clip last" });
+  assert.match(r.body.reply, /^The editor refused that move \(.*re-plan\)\. Nothing changed\.$/);
+  assert.equal(r.body.pending, null);
+});
+
+test("long or non-ASCII clip names still fit the 120-byte proposal label", () => {
+  assert.equal(fit("Remove C5500.MP4"), "Remove C5500.MP4");
+  for (const s of ["x".repeat(500), "é".repeat(200), "日本".repeat(100), "🎬".repeat(100)]) {
+    const label = fit(`Remove ${s}`);
+    assert.ok(Buffer.byteLength(label) <= 120 && label.startsWith("Remove ") && label.endsWith("…"), label);
+  }
 });
 
 test("invalid model output gets one retry quoting the error, then a polite refusal", async (t) => {
@@ -164,11 +187,12 @@ test("invalid model output gets one retry quoting the error, then a polite refus
   s.proxy.answers.push({ action: "remove", reply: "x", clips: [99] }, { action: "remove", reply: "Removing.", clips: [12] });
   let r = await s.call("/chat", { message: "remove the Chili's part" });
   assert.match(s.proxy.prompts[1].prompt, /clip 99 is not a clip in the active sequence/);
-  assert.match(r.body.reply, /isn't supported/);
+  assert.match(r.body.reply, /^Removing\. Preview ready/);
+  await s.call("/chat/reject", {});
   s.proxy.answers.push({ action: "delete_everything", reply: "x" }, { action: "trim", reply: "x", clip: 10, edge: "out", direction: "shorten", amount: 9999, unit: "frames" });
   r = await s.call("/chat", { message: "trim a lot" });
   assert.match(r.body.reply, /^Sorry, I couldn't.*only 300 frames long.*Nothing changed\.$/);
-  assert.equal(s.editor.previews.length, 0);
+  assert.equal(s.editor.previews.length, 1); // only the valid retry was previewed
 });
 
 test("stale revision: at preview and at accept, nothing changes and the creator is asked to retry", async (t) => {
@@ -250,6 +274,8 @@ test("validateAction: extra fields, missing fields, ids, handles", () => {
   bad({ action: "remove", reply: "r", clips: [10, 10] }, /distinct/);
   bad({ action: "remove", reply: "r", clips: ["10"] }, /not a clip/);
   bad({ action: "move", reply: "r", clip: 10, target: 10, position: "after" }, /different clip/);
+  snap.clips.set(14, { ...c(14, 1, 0, 30), track: "A2" });
+  bad({ action: "move", reply: "r", clip: 10, target: 14, position: "after" }, /same track/);
   bad(trim({ amount: 1.5 }), /whole number/);
   bad(trim({ amount: -2 }), /positive/);
   bad(trim({ amount: 0.01, unit: "seconds" }), /less than one frame/);

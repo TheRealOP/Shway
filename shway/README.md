@@ -23,7 +23,9 @@ Connection discovers command IDs and rejects engines that lack the proposal boun
 contains human-readable parameter descriptions; it is not itself a strict JSON schema. This adapter
 and Rust's typed deserializer validate the allowlisted proposal shape.
 
-The supported proposal steps are `timeline.trim`, `clip.replaceFromBin` and `timeline.place`. Proposals explicitly name
+The supported proposal steps are `timeline.trim`, `clip.replaceFromBin`, `timeline.place`,
+`timeline.remove` (`{clips}`: ripple delete with linked partners) and `timeline.move`
+(`{clip, anchor, position: "before"|"after"}`: rearrange on one track; counts as two references). Proposals explicitly name
 expected revision, active sequence, target clips, source IDs, and frame deltas. Requests are limited
 to 16 steps, 32 total explicit target references, and labels of at most 120 UTF-8 bytes. Rust stages them in a
 disposable session. `previewFrame` returns bounded RGBA pixels from that candidate without changing
