@@ -1,7 +1,34 @@
-# FilmCraft — rules for agents and contributors
+# Shway — rules for agents and contributors
 
 These rules apply to every human and AI contributor. `CLAUDE.md` holds the working instructions; this
 file holds the rules that must never be broken. When the two disagree, this file wins.
+
+## Shway: start with the wiki
+
+This repository is the Shway fork of Filmcraft. Before implementation, read the
+[knowledge graph](docs/wiki/README.md), [current build gate](docs/wiki/implementation.md),
+[YAGNI guidance](docs/wiki/yagni.md), and the page for the subsystem you touch.
+Follow the graph's related links and inspect the actual source before assuming a capability exists.
+
+**Use YAGNI by default:** implement the smallest complete behavior for the current task.
+Reuse Filmcraft commands, keep one authoritative project, preserve preview/cancel/undo,
+and defer speculative abstractions. If the exact Ponytail skill is available, read its real
+SKILL.md before using it; otherwise continue with YAGNI. Never invent a skill or its instructions.
+
+Keep wiki decisions, contracts, and verification evidence current with material changes.
+Linear is the task-status source. Do not mark planned features as verified without evidence.
+
+### Scope of fork instructions
+
+The Rust editor keeps the upstream safety, licensing, clean-room, layering, exact-time,
+and command rules below. The Shway TypeScript interaction surface and separate Python research
+worker are explicitly allowed additions; they do not replace Rust editing/rendering internals.
+TRIBE's noncommercial code/weights stay outside the permissively licensed editor.
+
+For documentation-only changes, check links, graph targets, and the diff.
+For runtime changes, run the applicable quality gates and integration checks documented in
+[acceptance](docs/wiki/acceptance.md). Report what was actually run.
+This documentation-specific rule takes precedence over blanket full-workspace-CI requirements below.
 
 ## 0. Never crash
 

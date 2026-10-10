@@ -1,12 +1,18 @@
-<p align="center">
-  <a href="https://getartcraft.com/">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/brand/artcraft-logo-white.svg">
-      <img alt="ArtCraft" src="docs/brand/artcraft-logo.svg" width="200">
-    </picture>
-  </a>
-</p>
+# Shway
 
+An AI video editor directed through voice and hand gestures, built on Filmcraft.
+
+**Start with the [linked implementation wiki and knowledge graph](docs/wiki/README.md).**
+Agents: read [AGENTS.md](AGENTS.md), [CLAUDE.md](CLAUDE.md), and
+[YAGNI guidance](docs/wiki/yagni.md) before implementation.
+
+[Linear backlog](https://linear.app/dev-system/project/schway-4deadf7f36cc) ·
+[Build gates](docs/wiki/implementation.md) · [Architecture](docs/wiki/architecture.md)
+
+Shway-specific features are planned; the fork has not yet been compiled or verified in this session.
+The following is inherited Filmcraft documentation and capability descriptions.
+
+---
 
 <h1 align="center">FilmCraft</h1>
 
