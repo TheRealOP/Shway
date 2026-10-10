@@ -140,7 +140,7 @@ test("decide forwards a bounded Jev question with a bearer key and returns its a
   assert.equal(r.json.answers.take.choice, "take-1");
   assert.equal(s.seen[0].url, "https://api.typesafe.ai/v1/systemone");
   assert.equal(s.seen[0].init.headers.authorization, `Bearer ${JEV}`);
-  assert.deepEqual(s.seen[0].body, { model: "jev-latest", state: { correction: "x" }, questions: QUESTION });
+  assert.deepEqual(s.seen[0].body, { model: "jev-1.13.0", state: { correction: "x" }, questions: QUESTION });
   for (const bad of [{ questions: QUESTION }, { state: 1, questions: {} }, { state: 1, questions: { q: { type: "free" } } },
     { state: 1, questions: QUESTION, model: "gpt-5" }, { state: 1, questions: QUESTION, extra: 1 }]) {
     assert.equal((await s.call("/decide", { body: bad })).status, 400, JSON.stringify(bad));

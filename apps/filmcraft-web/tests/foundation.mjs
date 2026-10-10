@@ -4,11 +4,15 @@
 // Verifies same-page save/reopen; OPFS recovery across reload is a separate gate.
 // --creator --transcript <word-timed JSON> [--proxy http://127.0.0.1:8790] [--decider gemini|jev]: replace the synthetic trim
 // with the AI first cut + replacement chain (creator.mjs), then save/reopen/export that result.
+// --handoff --transcript <json> --media-file <local source path> [--handoff-dir <dir>] [--decider jev|gemini]:
+// TRIBE baseline + one deliberate edit, both exported with a manifest (handoff.mjs).
 import assert from "node:assert/strict";
 import {checkProposals} from "./proposals.mjs";
 import {checkTranscripts} from "./transcripts.mjs";
 import {checkCreator} from "./creator.mjs";
+import {buildBaseline, editBaseline, writeHandoff} from "./handoff.mjs";
 import {spawn, execFile} from "node:child_process";
+import {createHash} from "node:crypto";
 import {mkdirSync, writeFileSync, readFileSync, statSync, mkdtempSync, rmSync} from "node:fs";
 import {join} from "node:path";
 import {tmpdir} from "node:os";
@@ -24,7 +28,7 @@ const report = {ok: false, steps: {}, gates: {}};
 const logs = [];
 const pending = new Map();
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-let proc, ws, profile, spawnError, nextId = 1;
+let proc, ws, profile, spawnError, downloads, nextId = 1;
 const run = promisify(execFile);
 
 function send(method, params = {}, timeout = 30000) {
@@ -81,6 +85,31 @@ function timeline(sequence) {
   return {id: sequence.id, settings: sequence.settings, duration: sequence.duration, video: sequence.video, audio: sequence.audio};
 }
 function clips(sequence) {return [...sequence.video, ...sequence.audio].flatMap(track => track.items);}
+// H.264/AAC export of the active sequence, downloaded and checked with ffprobe/ffmpeg. Gates are
+// prefixed with the name unless it is "foundation".
+async function exportProbe(name, sequence) {
+  const prefix = name === "foundation" ? "" : `${name}.`;
+  const exportPath = `/exports/${name}.mp4`;
+  const started = await execute("file.exportMedia", {format: "h264", path: exportPath, bitrateKbps: 4000, range: "entire", audio: true});
+  const job = await until(async () => (await execute("jobs.list")).find(value => value.id === started.job && value.finished), 300000, `${name} H.264 export`);
+  gate(`${prefix}exportSuccess`, job.result && !job.result.error && job.result.frames > 0 && job.result.bytes > 0, job);
+  const files = await evaluate("filmcraft.files()");
+  gate(`${prefix}virtualExport`, files.some(file => file.path === exportPath && file.size > 0), files);
+  const downloadedPath = join(downloads, `${name}.mp4`);
+  await until(async () => {try {return statSync(downloadedPath).size === job.result.bytes;} catch {return false;}}, 15000, `complete ${name} MP4 download`);
+  const probe = JSON.parse((await run(arg("ffprobe", "ffprobe"), ["-v", "error", "-count_frames", "-show_streams", "-show_format", "-of", "json", downloadedPath], {timeout: 30000, maxBuffer: 1 << 20})).stdout);
+  const streams = probe.streams;
+  gate(`${prefix}h264AAC`, streams.some(stream => stream.codec_type === "video" && stream.codec_name === "h264") && streams.some(stream => stream.codec_type === "audio" && stream.codec_name === "aac"), streams);
+  gate(`${prefix}exportFrameCount`, streams.some(stream => stream.codec_type === "video" && Number(stream.nb_read_frames) === job.result.frames), streams);
+  const rate = sequence.settings.frame_rate ?? sequence.settings.frameRate;
+  const tolerance = rate ? 2 * rate.den / rate.num : 0.1;
+  const expectedSeconds = sequence.duration / 254016000000;
+  gate(`${prefix}exportDuration`, Math.abs(Number(probe.format.duration) - expectedSeconds) <= tolerance, {expectedSeconds, tolerance, actual: probe.format.duration});
+  const decode = await run(arg("ffmpeg", "ffmpeg"), ["-v", "error", "-xerror", "-i", downloadedPath, "-f", "null", "-"], {timeout: 60000, maxBuffer: 1 << 20});
+  gate(`${prefix}exportDecodes`, !decode.stderr.trim(), decode.stderr);
+  const bytes = readFileSync(downloadedPath);
+  return {started, job, probe, download: {path: downloadedPath, bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex")}};
+}
 
 try {
   const url = new URL(arg("url", "http://127.0.0.1:8765/"));
@@ -89,7 +118,7 @@ try {
   const media = new URL(arg("media", "web-test.mp4"), url).href;
   report.media = media;
   const chrome = arg("chrome", process.platform === "darwin" ? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" : "google-chrome");
-  const downloads = mkdtempSync(join(out, "downloads-"));
+  downloads = mkdtempSync(join(out, "downloads-"));
   // A unique profile isolates OPFS, browser state and the debugging endpoint.
   profile = mkdtempSync(join(tmpdir(), "fc-foundation-chrome-"));
   proc = spawn(chrome, [
@@ -209,6 +238,18 @@ try {
     gate("creatorChain", report.steps.creator.ok, report.steps.creator);
     accepted = await execute("sequence.inspect");
     report.steps.creator.screenshot = await screenshot("02-creator-cut");
+  } else if (process.argv.includes("--handoff")) {
+    const proxy = arg("proxy", "http://127.0.0.1:8790"), transcriptPath = arg("transcript");
+    const base = await buildBaseline({evaluate, item: report.steps.import.items[0], transcriptPath});
+    gate("handoffBaseline", base.ok, base);
+    base.export = await exportProbe("baseline", base.sequence);
+    const edited = await editBaseline({evaluate, proxy, decider: arg("decider", "jev")});
+    gate("handoffEdit", edited.ok, edited);
+    gate("handoffOneUndo", edited.history.length === base.history.length + 1, {before: base.history, after: edited.history});
+    edited.export = await exportProbe("edited", edited.sequence);
+    gate("handoffRendersDiffer", base.export.download.sha256 !== edited.export.download.sha256);
+    report.steps.handoff = writeHandoff({dir: arg("handoff-dir", join(out, "handoff")), mediaPath: arg("media-file"), transcriptPath, baseline: base, edited});
+    accepted = await execute("sequence.inspect");
   } else {
     const trimFrames = 15;
     gate("fixtureLongEnough", video[0].durationFrames > trimFrames + 1, video[0]);
@@ -244,27 +285,7 @@ try {
   gate("saveReopen", report.steps.reopen.missingMedia === 0 && !project.dirty && JSON.stringify(timeline(reopened)) === JSON.stringify(timeline(accepted)), {reopen: report.steps.reopen, project, reopened});
   report.steps.reopenedTimeline = reopened;
 
-  const exportPath = "/exports/foundation.mp4";
-  const started = await execute("file.exportMedia", {format: "h264", path: exportPath, bitrateKbps: 4000, range: "entire", audio: true});
-  const job = await until(async () => (await execute("jobs.list")).find(value => value.id === started.job && value.finished), 300000, "H.264 export");
-  report.steps.export = {started, job};
-  gate("exportSuccess", job.result && !job.result.error && job.result.frames > 0 && job.result.bytes > 0, job);
-  const files = await evaluate("filmcraft.files()");
-  gate("virtualExport", files.some(file => file.path === exportPath && file.size > 0), files);
-  const downloadedPath = join(downloads, "foundation.mp4");
-  await until(async () => {try {return statSync(downloadedPath).size === job.result.bytes;} catch {return false;}}, 15000, "complete MP4 download");
-  const probe = await run(arg("ffprobe", "ffprobe"), ["-v", "error", "-count_frames", "-show_streams", "-show_format", "-of", "json", downloadedPath], {timeout: 30000, maxBuffer: 1 << 20});
-  report.steps.export.probe = JSON.parse(probe.stdout);
-  const streams = report.steps.export.probe.streams;
-  gate("h264AAC", streams.some(stream => stream.codec_type === "video" && stream.codec_name === "h264") && streams.some(stream => stream.codec_type === "audio" && stream.codec_name === "aac"), streams);
-  gate("exportFrameCount", streams.some(stream => stream.codec_type === "video" && Number(stream.nb_read_frames) === job.result.frames), streams);
-  const rate = reopened.settings.frame_rate ?? reopened.settings.frameRate;
-  const tolerance = rate ? 2 * rate.den / rate.num : 0.1;
-  const expectedSeconds = reopened.duration / 254016000000;
-  gate("exportDuration", Math.abs(Number(report.steps.export.probe.format.duration) - expectedSeconds) <= tolerance, {expectedSeconds, tolerance, actual: report.steps.export.probe.format.duration});
-  const decode = await run(arg("ffmpeg", "ffmpeg"), ["-v", "error", "-xerror", "-i", downloadedPath, "-f", "null", "-"], {timeout: 60000, maxBuffer: 1 << 20});
-  gate("exportDecodes", !decode.stderr.trim(), decode.stderr);
-  report.steps.export.download = {path: downloadedPath, bytes: statSync(downloadedPath).size};
+  report.steps.export = await exportProbe("foundation", reopened);
   report.steps.export.screenshot = await screenshot("03-exported");
   await inspect();
   gate("noPanic", !logs.some(line => /panicked at|RuntimeError|EXCEPTION/.test(line)) && !(await evaluate("window.filmcraftLoad.fatal || null")), logs);

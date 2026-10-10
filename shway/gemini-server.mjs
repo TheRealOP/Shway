@@ -19,7 +19,7 @@ const TRANSCRIBE = "Transcribe this audio verbatim. Return only the spoken words
 const MAX_PROMPT = 500_000;
 const TIMEOUT_MS = 90_000;
 const JEV_API = "https://api.typesafe.ai/v1/systemone";
-export const DEFAULT_JEV_MODEL = "jev-latest";
+export const DEFAULT_JEV_MODEL = "jev-1.13.0"; // pinned: jev-latest moves; GET /v1/models lists aliases
 const JEV_TIMEOUT_MS = 10_000;
 
 /** KEY=VALUE lines; comments, blank lines and `export ` prefixes allowed; one pair of quotes stripped. */

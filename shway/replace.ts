@@ -189,7 +189,7 @@ const JEV_INSTRUCTIONS = "The editor selected one take of a scripted line and ga
  * correction, the current take's words and the other takes as named choices; never IDs or times.
  * Below minConfidence the answer becomes REVIEW.
  */
-export function jevDecide(base = "http://127.0.0.1:8790", {model = "jev-latest", minConfidence = 0.6} = {}): Decide {
+export function jevDecide(base = "http://127.0.0.1:8790", {model = "jev-1.13.0", minConfidence = 0.6} = {}): Decide {
   // ponytail: one fixed confidence threshold; calibrate it against creator accept/reject logs (DEV-101).
   return async prepared => {
     const criteria: Record<string, string> = {};

@@ -150,7 +150,7 @@ node shway/gemini-server.mjs --port 8790      # reads GEMINI_API_KEY (optional G
   `{model, usage, text}`. Request bodies may be up to 10 MB on this route only.
 - **`GET /health`:** returns `{ok, model, jev}`.
 - **`POST /decide`:** with `JEV_KEY` in the `.env`, forwards `{state, questions, model?}` (1–8 questions;
-  the model must be `jev-*`, default `jev-latest`) to TypeSafe `POST /v1/systemone` with the key as a bearer
+  the model must be `jev-*`, default pinned `jev-1.13.0`) to TypeSafe `POST /v1/systemone` with the key as a bearer
   token. Returns `{model, answers, usage}`. Without a key it returns 503. Errors never contain either key.
 - **Default model:** `gemini-3.8-flash`. It calls `models/{model}:generateContent` with the key in the
   `x-goog-api-key` header.
