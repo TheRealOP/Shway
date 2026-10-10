@@ -4,6 +4,7 @@
 // Verifies same-page save/reopen; OPFS recovery across reload is a separate gate.
 import assert from "node:assert/strict";
 import {checkProposals} from "./proposals.mjs";
+import {checkTranscripts} from "./transcripts.mjs";
 import {spawn, execFile} from "node:child_process";
 import {mkdirSync, writeFileSync, readFileSync, statSync, mkdtempSync, rmSync} from "node:fs";
 import {join} from "node:path";
@@ -188,6 +189,11 @@ try {
     screenshot: await screenshot("01-source-playback"),
   };
   gate("playback", sourceSeconds >= 1 && shown > 0, report.steps.playback);
+
+  if (process.argv.includes("--transcripts")) {
+    report.steps.transcripts = await checkTranscripts({evaluate});
+    gate("transcriptIntegration", report.steps.transcripts.ok, report.steps.transcripts);
+  }
 
   if (process.argv.includes("--proposals")) {
     report.steps.proposals = await checkProposals({evaluate, screenshot});

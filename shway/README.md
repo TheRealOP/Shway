@@ -6,7 +6,7 @@ project, exact edit time, rendering, and undo history. No second timeline is mai
 Requires Node 26 for the dependency-free TypeScript-to-browser module build:
 
 ```sh
-node --test shway/adapter.test.ts
+node --test shway/*.test.ts
 node shway/build.mjs --out target/agent-foundation/web/dist
 ```
 
@@ -49,6 +49,36 @@ to the editor's index:
 ffmpeg -hide_banner -loglevel error -y -f lavfi -i color=c=purple:size=320x180:rate=24 -f lavfi -i sine=frequency=880:sample_rate=48000 -t 4 -c:v libx264 -preset fast -pix_fmt yuv420p -c:a aac target/agent-foundation/web/dist/alternative.mp4
 ffmpeg -hide_banner -loglevel error -y -f lavfi -i color=c=green:size=320x180:rate=24 -f lavfi -i sine=frequency=220:sample_rate=48000 -t 1 -c:v libx264 -preset fast -pix_fmt yuv420p -c:a aac target/agent-foundation/web/dist/short.mp4
 node apps/filmcraft-web/tests/foundation.mjs --url http://127.0.0.1:8765/ --media web-test.mp4 --out target/agent-foundation/web/proposals --proposals
+```
+
+## Transcripts and takes (DEV-88)
+
+`takes.ts` holds a provider-neutral word-timed transcript format and a take index; no
+transcription provider is chosen. One JSON object per recorded source item:
+
+```json
+{"sourceItemId": 41, "timeUnit": "seconds", "language": "en",
+ "words": [{"text": "Welcome", "start": 0.5, "end": 0.9, "confidence": 0.93}]}
+```
+
+`timeUnit` is `seconds` or `ticks` (no default). `parseTranscript` rejects unknown fields, NaN,
+infinities, negative/fractional ticks, unordered or overlapping words, empty or >100-character
+words, more than 20,000 words, and times that do not convert to exact safe-integer ticks
+(254,016,000,000 per second, rounded once at this boundary). `adapter.importTranscript(input)`
+validates before any await, requires a Movie/Audio project item whose duration covers every word,
+then calls the engine's `transcript.set` (`{item, transcript: {language, words}}`) as one undoable
+"Set Transcript" edit, replacing that item's earlier transcript.
+
+`indexTakes(transcripts, script, minScore = 0.6)` groups word ranges into takes per script
+statement: for each start word it takes the best window up to 1.25× the statement length, scored
+by Dice overlap of normalized tokens, then accepts candidates greedily by score without overlap.
+Each `Take` is `{sourceItemId, sourceIn, sourceOut, words, statementIndex, score}`; `sourceIn`/
+`sourceOut` are source-media ticks of the first word start and last word end, never timeline
+clip IDs or sequence time. Linked audio and multi-source sync are not indexed.
+
+```sh
+node --test shway/*.test.ts
+node apps/filmcraft-web/tests/foundation.mjs --url http://127.0.0.1:8765/ --media web-test.mp4 --out target/web/transcripts --transcripts
 ```
 
 See [foundation evidence](../docs/wiki/foundation-evidence.md) and the
