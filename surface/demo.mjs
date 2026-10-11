@@ -6,9 +6,9 @@ export function createHoldToTalk({ holdMs = 800 } = {}) {
   /** @type {number | null} */ let since = null;
   let talking = false;
   return {
-    /** @param {number} t @param {{state: string, pinching: boolean}} v @returns {"talk" | "done" | "abort" | null} */
+    /** @param {number} t @param {{state: string, horns: boolean}} v @returns {"talk" | "done" | "abort" | null} */
     step(t, v) {
-      if (v.state === "Armed" && v.pinching) {
+      if (v.state === "Armed" && v.horns) {
         since ??= t;
         if (!talking && t - since >= holdMs) { talking = true; return "talk"; }
         return null;
