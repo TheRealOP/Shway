@@ -17,6 +17,8 @@ import { createBridge } from "../surface/gestures/bridge.mjs";
 
 const TPS = 254016000000;
 const MAX_BODY = 64 * 1024;
+const MAX_INK_BODY = 512 * 1024; // 20 strokes × 500 points of [x, y]
+const MAX_STROKES = 20, MAX_POINTS = 500;
 const MAX_MESSAGES = 200; // ponytail: in-memory, lost on restart; persist per project if creators need history
 const MAX_LINE = 64 * 1024 * 1024;
 const MAX_CLIP_TEXT = 600;
@@ -296,6 +298,18 @@ export function createAssistant({ editor = "127.0.0.1:9876", proxy = "http://127
     const range = marked ? `, marking ${sec(Math.min(m.playhead, now))}–${sec(Math.max(m.playhead, now))} s` : "";
     return `Review note at ${sec(m.playhead)} s${m.clip != null ? ` on clip ${m.clip}` : ""}${range}: ${transcript}`;
   }
+  // ---- Ink (DEV-91): the camera page's pointer and sketch → ui.set {ink} on the Program monitor.
+  // Skips the busy lock; while one ui.set is in flight, newer bodies replace each other and only the latest goes next.
+  let inkLatest = null, inkSending = null;
+  function sendInk(ink) {
+    inkLatest = ink;
+    inkSending ??= (async () => {
+      try {
+        while (inkLatest) { const i = inkLatest; inkLatest = null; await transport.request("ui.set", { ink: i }); }
+      } finally { inkSending = null; }
+    })();
+    return inkSending;
+  }
   /** After accept, reject or cancel: play on (reject/cancel first return to the stopped moment). */
   async function resume(back) {
     if (!moment) return;
@@ -324,12 +338,13 @@ export function createAssistant({ editor = "127.0.0.1:9876", proxy = "http://127
       if (!route) throw new HttpError(404, `use GET /chat/state or POST /chat, /chat/accept, /chat/reject, ${Object.keys(REVIEW).join(", ")}`);
       let size = 0;
       const chunks = [];
+      const limit = route === "/ink" ? MAX_INK_BODY : MAX_BODY;
       for await (const c of req) {
         size += c.length;
-        if (size > 4 * MAX_BODY) return req.destroy();
-        if (size <= MAX_BODY) chunks.push(c);
+        if (size > 4 * limit) return req.destroy();
+        if (size <= limit) chunks.push(c);
       }
-      if (size > MAX_BODY) throw new HttpError(413, "request body too large");
+      if (size > limit) throw new HttpError(413, "request body too large");
       const text = Buffer.concat(chunks).toString("utf8");
       let body;
       try { body = text.trim() ? JSON.parse(text) : {}; } catch { throw new HttpError(400, "invalid JSON"); }
@@ -339,6 +354,7 @@ export function createAssistant({ editor = "127.0.0.1:9876", proxy = "http://127
       if (route === "/chat" && (typeof body.message !== "string" || !body.message.trim() || body.message.length > 2000)) throw new HttpError(400, "message must be 1–2000 characters");
       if (route === "/review/transport") body = { event: readTransport(body.event) };
       if (route === "/review/note") body = readNote(body);
+      if (route === "/ink") { await sendInk(readInk(body)); return send(200, { ok: true }); }
       if (route.startsWith("/review/") && route !== "/review/note") return send(200, await review(route, body));
       if (busy) throw new HttpError(409, "busy with the previous request; try again when it finishes");
       busy = true;
@@ -371,9 +387,10 @@ class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 
-// ---- Review routes (DEV-113): fields per route, and the boundary checks for their bodies.
-const REVIEW = { "/review/stop": [], "/review/cancel": [], "/review/transport": ["event"], "/review/note": ["moment", "transcript", "gestures"] };
-const TRANSPORT = ["engage", "shuttle", "step", "release", "cancel", "tracking-lost", "swipe", "double-tap"];
+// ---- Lock-free routes (DEV-113 review, DEV-91 ink): fields per route, and the boundary checks for their bodies.
+const REVIEW = { "/review/stop": [], "/review/cancel": [], "/review/transport": ["event"], "/review/note": ["moment", "transcript", "gestures"],
+  "/ink": ["pointer", "strokes", "drawing"] };
+const TRANSPORT = ["engage", "shuttle", "step", "release", "cancel", "tracking-lost", "swipe", "pause", "slide"];
 const bad = (m) => { throw new HttpError(400, m); };
 const isObj = (v) => v && typeof v === "object" && !Array.isArray(v);
 
@@ -385,7 +402,20 @@ export function readTransport(e) {
   if (e.type === "shuttle" && !(typeof e.rate === "number" && Number.isFinite(e.rate) && Math.abs(e.rate) <= 8)) bad("shuttle rate must be a number within ±8");
   if (e.type === "step" && !(Number.isSafeInteger(e.frames) && e.frames !== 0 && Math.abs(e.frames) <= 1000)) bad("step frames must be a nonzero integer within ±1000");
   if (e.type === "swipe" && !["left", "right"].includes(e.direction)) bad("swipe direction must be left or right");
-  return { type: e.type, ...(e.type === "shuttle" && { rate: e.rate }), ...(e.type === "step" && { frames: e.frames }), ...(e.type === "swipe" && { direction: e.direction }) };
+  if (e.type === "slide" && !(typeof e.seconds === "number" && Number.isFinite(e.seconds) && Math.abs(e.seconds) <= 600)) bad("slide seconds must be a number within ±600");
+  return { type: e.type, ...(e.type === "shuttle" && { rate: e.rate }), ...(e.type === "step" && { frames: e.frames }), ...(e.type === "swipe" && { direction: e.direction }),
+    ...(e.type === "slide" && { seconds: e.seconds }) };
+}
+
+/** {pointer: [x, y] | null, strokes: [[[x, y], …], …], drawing} in 0–1 frame coordinates. Keeps the last 20 strokes,
+ * the first 500 valid points of each; drops non-finite or out-of-range points and strokes left empty. */
+export function readInk({ pointer = null, strokes = [], drawing = false }) {
+  const point = (p) => Array.isArray(p) && p.length === 2 && p.every((v) => typeof v === "number" && v >= 0 && v <= 1);
+  if (pointer !== null && !point(pointer)) bad("pointer must be null or [x, y] within 0–1");
+  if (!Array.isArray(strokes) || strokes.length > 1000 || strokes.some((s) => !Array.isArray(s))) bad("strokes must be an array of point arrays");
+  if (typeof drawing !== "boolean") bad("drawing must be true or false");
+  const kept = strokes.map((s) => s.filter(point).slice(0, MAX_POINTS).map(([x, y]) => [x, y])).filter((s) => s.length).slice(-MAX_STROKES);
+  return { pointer: pointer && [pointer[0], pointer[1]], strokes: kept, drawing };
 }
 
 /** {moment: {revision, playhead, clip}, transcript, gestures?} as returned by /review/stop plus what was said. */

@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer as tcp } from "node:net";
 import { createServer as http } from "node:http";
-import { createAssistant, fit, validateAction } from "./assistant.mjs";
+import { createAssistant, fit, readInk, validateAction } from "./assistant.mjs";
 
 const TPS = 254016000000, F = TPS / 30;
 const REQUIRED = ["project.inspect", "sequence.inspect", "timeline.select", "playhead.set", "edit.undo", "file.exportMedia", "jobs.list",
@@ -13,7 +13,7 @@ const REQUIRED = ["project.inspect", "sequence.inspect", "timeline.select", "pla
 const clip = (clip, item, link, start, dur, sourceIn, name) => ({ clip, item, link, name, start: start * F, duration: dur * F, sourceIn: sourceIn * F, sourceOut: (sourceIn + dur) * F });
 
 function fakeEditor() {
-  const st = { revision: 5, proposal: null, next: 1, history: [], previews: [], onPreview: null, playhead: 400 * F, playing: true, ui: [] };
+  const st = { revision: 5, proposal: null, next: 1, history: [], previews: [], onPreview: null, playhead: 400 * F, playing: true, ui: [], ink: [], inkGate: null };
   const seq = () => ({
     id: 27, name: "Cut", duration: 450 * F, settings: { frame_rate: { num: 30, den: 1 } }, playhead: 0, selection: [],
     video: [{ id: 1, locked: false, items: [clip(10, 1, 1, 0, 300, 30, "C5500.MP4"), clip(12, 2, 2, 300, 150, 0, "C5517.MP4")] }],
@@ -54,6 +54,11 @@ function fakeEditor() {
       let i;
       while ((i = buf.indexOf("\n")) >= 0) {
         const req = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1);
+        if (req.method === "ui.set") { // waits on st.inkGate, so a test can hold one in flight
+          st.ink.push(req.params.ink);
+          Promise.resolve(st.inkGate).then(() => sock.write(JSON.stringify({ id: req.id, ok: true, result: {} }) + "\n"));
+          continue;
+        }
         let reply;
         try {
           const result = req.method === "engine.commands" ? REQUIRED.map((id) => ({ id })) : req.method === "ui.inspect" ? { playhead: st.playhead }
@@ -354,4 +359,61 @@ test("review transport and HTTP boundary: bridge drives playback; chop, hostile 
   assert.equal(pre.status, 204);
   assert.equal(pre.headers.get("access-control-allow-origin"), "http://127.0.0.1:8771");
   assert.equal((await fetch(`http://127.0.0.1:${s.port}/review/note`, { method: "OPTIONS", headers: { origin: "https://evil.example" } })).status, 403);
+});
+
+// ---- Part 2 gestures (DEV-91): fist pause / slide transport, and the camera page's ink.
+test("review transport: a fist pauses, a slide seeks from the paused playhead (no undo entry); double tap is gone", async (t) => {
+  const s = await setup(); t.after(s.close);
+  assert.equal((await s.call("/review/transport", { event: { type: "pause" } })).status, 200);
+  assert.equal(s.editor.playing, false);
+  assert.equal((await s.call("/review/transport", { event: { type: "slide", seconds: 2 } })).status, 200);
+  assert.deepEqual(s.editor.ui.at(-1), ["seek", 400 * F + 2 * TPS]);
+  await s.call("/review/transport", { event: { type: "slide", seconds: -500 } });
+  assert.deepEqual(s.editor.ui.at(-1), ["seek", 0], "clamped at 0");
+  await s.call("/review/transport", { event: { type: "cancel" } });
+  assert.deepEqual(s.editor.ui.at(-1), ["seek", 400 * F], "Esc returns to where the fist closed");
+  assert.deepEqual([s.editor.history, s.editor.revision], [[], 5]);
+  for (const event of [{ type: "slide" }, { type: "slide", seconds: 1e6 }, { type: "slide", seconds: "1" }, { type: "double-tap" }, { type: "pointer", x: 0, y: 0 }])
+    assert.equal((await s.call("/review/transport", { event })).status, 400, JSON.stringify(event));
+});
+
+test("/ink: forwards ui.set {ink}; skips the busy lock; coalesces to the latest while one is in flight", async (t) => {
+  const s = await setup(); t.after(s.close);
+  const ink = { pointer: [0.5, 0.25], strokes: [[[0.1, 0.2], [0.3, 0.4]]], drawing: true };
+  assert.deepEqual(await s.call("/ink", ink), { status: 200, body: { ok: true } });
+  assert.deepEqual(s.editor.ink, [ink]);
+  // Busy with a chat: ink still goes through.
+  const open = s.proxy.hold();
+  s.proxy.answers.push({ action: "answer", reply: "ok" });
+  const chat = s.call("/chat", { message: "hi" });
+  while (!s.proxy.prompts.length) await new Promise((r) => setTimeout(r, 5));
+  assert.equal((await s.call("/chat", { message: "again" })).status, 409);
+  assert.equal((await s.call("/ink", { pointer: null, strokes: [], drawing: false })).status, 200);
+  open(); await chat;
+  // One ui.set in flight: of the bodies that arrive meanwhile only the newest is sent next.
+  let release;
+  s.editor.inkGate = new Promise((r) => (release = r));
+  s.editor.ink.length = 0;
+  const body = (x) => ({ pointer: [x, x], strokes: [], drawing: false });
+  const sent = [s.call("/ink", body(0.1))];
+  while (s.editor.ink.length < 1) await new Promise((r) => setTimeout(r, 5));
+  for (const x of [0.2, 0.3]) { sent.push(s.call("/ink", body(x))); await new Promise((r) => setTimeout(r, 30)); }
+  release();
+  assert.ok((await Promise.all(sent)).every((r) => r.status === 200));
+  assert.deepEqual(s.editor.ink.map((i) => i.pointer[0]), [0.1, 0.3]);
+});
+
+test("/ink is hostile-input safe: caps 20 strokes × 500 points, drops bad points, refuses bad shapes", async (t) => {
+  const s = await setup(); t.after(s.close);
+  const stroke = (k) => [[NaN, 0], [2, 0.5], ...Array.from({ length: 600 }, (_, i) => [k / 100, i / 600])];
+  const r = await s.call("/ink", { pointer: null, strokes: [[], ...Array.from({ length: 25 }, (_, k) => stroke(k))], drawing: true });
+  assert.equal(r.status, 200);
+  const got = s.editor.ink.at(-1);
+  assert.equal(got.strokes.length, 20);
+  assert.ok(got.strokes.every((p) => p.length === 500));
+  assert.deepEqual(got.strokes[0][0], [0.05, 0], "the newest 20 strokes are kept");
+  for (const b of [{ pointer: [2, 0] }, { pointer: [0.5] }, { pointer: "x" }, { strokes: "x" }, { strokes: [7] }, { drawing: "yes" }, { extra: 1 }])
+    assert.equal((await s.call("/ink", b)).status, 400, JSON.stringify(b));
+  assert.equal((await s.call("/ink", JSON.stringify({ strokes: [[["x".repeat(600 * 1024)]]] }))).status, 413);
+  assert.deepEqual(readInk({}), { pointer: null, strokes: [], drawing: false });
 });
