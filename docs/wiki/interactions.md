@@ -32,7 +32,7 @@ One gesture, one meaning. Thresholds live in `DEFAULTS` in
 | Quick thumb–index **double tap** | Draw toggle | 1st: drawing on, point = pen down, any other pose = pen up. 2nd: sketch finished, stays on screen, back to laser pointer. A held pinch does nothing; the tap freezes the pointer and lifts the pen | Verified in replay tests; live camera not verified |
 | Fist held ~150 ms | Pause | Stops playback. Passing through a fist doesn't count | Verified in replay and bridge tests; live not verified |
 | Fist slid left/right | Slider scrub | Playhead = playhead at the pause + 20 s × offset across the active box (absolute, dead zone). Open the hand to drop it there | Verified in replay, bridge and assistant tests; live not verified |
-| 🤘 held | Shuttle | Engage; wrist twist = speed, Shift = frame steps, unchanged | Verified in replay tests; live not verified |
+| 🤘 held (index + pinky up, middle + ring down, thumb ignored) | Shuttle | Engage; wrist twist = speed, Shift = frame steps, unchanged | Verified in replay tests; live not verified |
 | Esc | Cancel | Clears the sketch; a scrub returns to where the fist / 🤘 started | Verified in replay and bridge tests |
 
 Guards: swipe and chop need an open hand, so pointing, fists and drawing never fire them. While

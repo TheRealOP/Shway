@@ -27,7 +27,7 @@ If a track overruns, cut scope (see "Order and cut line"); never leave the branc
   toggle. Push-to-talk (existing `/transcribe`) is the fallback.
 - **Pause and slider scrub:** making a **fist pauses** playback. **Sliding the fist left/right** is a
   slider scrub: the playhead follows the hand like a dragged scrubber.
-- **Shuttle (speed scrub):** the 🤘 pose (index and pinky out, thumb touching the middle and ring tips)
+- **Shuttle (speed scrub):** the 🤘 pose (index and pinky out, middle and ring down, thumb ignored)
   **replaces the pinch** as the engage pose. The motion stays the existing **wrist twist**.
 - Other Part 2 branches (cut DEV-114, insert DEV-115, music DEV-110, media DEV-117, paste DEV-116,
   learn DEV-95) are **parked**. They exist only on the creator's Mac. Don't recreate them.
@@ -111,8 +111,8 @@ hostile-input rules.
 - **Finger extended:** the tip is farther from the wrist than its knuckle (`FINGERS` already lists
   `[knuckle, tip]`).
 - **Point pose:** index extended; middle, ring and pinky curled.
-- **🤘 pose:** index and pinky extended, and the thumb tip near both the middle and ring tips. Use the
-  same palm-normalised ratio style as the pinch, with hysteresis.
+- **🤘 pose:** index and pinky extended, middle and ring curled; the thumb is ignored. (Originally the
+  thumb also had to touch the middle and ring tips; dropped because live the pose didn't register.)
 - **Fist pose:** all four fingers curled (tip nearer the wrist than its knuckle), held ≥ ~150 ms.
 - **Events:**
   - `pointer {x, y}`: index tip mapped from the central ~60% of the camera image onto 0–1, mirrored,

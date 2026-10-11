@@ -32,8 +32,6 @@
 export const DEFAULTS = {
   minScore: 0.6,
   fingerOut: 1.0, // a finger is extended when its tip is this many times farther from the wrist than its knuckle, else curled
-  hornsOn: 0.35, // 🤘 engage: farther of thumb–middle / thumb–ring tip distance / palm length below this, release above hornsOff
-  hornsOff: 0.5,
   fistHoldMs: 150, // all four fingers curled this long = pause (a fist passed through between poses doesn't count)
   pointerBox: 0.6, // central share of the camera image mapped onto 0–1 (pointer and slide)
   pointerSmoothing: 0.5, // EMA weight of each new pointer / palm sample, (0, 1]
@@ -66,7 +64,7 @@ export const DEFAULTS = {
   chopCooldownMs: 1000,
 };
 
-const WRIST = 0, THUMB_TIP = 4, INDEX_MCP = 5, INDEX_TIP = 8, MIDDLE_MCP = 9, MIDDLE_TIP = 12, RING_TIP = 16, PINKY_MCP = 17;
+const WRIST = 0, THUMB_TIP = 4, INDEX_MCP = 5, INDEX_TIP = 8, MIDDLE_MCP = 9, MIDDLE_TIP = 12, PINKY_MCP = 17;
 const FINGERS = [[5, 8], [9, 12], [13, 16], [17, 20]]; // [knuckle, tip]
 const DEG = 180 / Math.PI;
 
@@ -161,7 +159,7 @@ export function createRecognizer(config = {}) {
   let tapRatio = Infinity; // thumb–index closeness, for feedback
   let chopTravel = 0; // fingertip drop so far in the window, palm lengths, for feedback
   let confidence = 0;
-  let hornsRatio = Infinity; // last 🤘 thumb ratio, for feedback
+  let hornsFingers = 0; // how many of the four 🤘 finger conditions hold, for feedback
   /** @type {Pose | null} */ let pose = null;
   let drawing = false;
   let penDown = false;
@@ -208,10 +206,10 @@ export function createRecognizer(config = {}) {
       const middle = len(sub(h.world[THUMB_TIP], h.world[MIDDLE_TIP])) / palm;
       const fingers = poseOf(h.world, c);
       pose = fingers.pose;
-      // 🤘: index and pinky out, the thumb holding the curled middle and ring tips.
-      hornsRatio = Math.max(middle, len(sub(h.world[THUMB_TIP], h.world[RING_TIP])) / palm);
+      // 🤘: index and pinky out, middle and ring down. The thumb is ignored (tucked or out both count).
       const [ix, mx, rx, px] = fingers.out;
-      horns = ix && px && !mx && !rx && hornsRatio < (horns ? c.hornsOff : c.hornsOn);
+      hornsFingers = [ix, !mx, !rx, px].filter(Boolean).length;
+      horns = hornsFingers === 4;
       // Turned hands hide the fingertips and their depth estimate gets noisy; when the tips touch,
       // their on-screen distance stays small, so take the nearer of the two.
       const imgPalm = Math.max(1e-9, imageDist(h.image, WRIST, MIDDLE_MCP, c.aspect));
@@ -227,7 +225,7 @@ export function createRecognizer(config = {}) {
       horns = false;
       tapping = false;
       tapRatio = Infinity;
-      hornsRatio = Infinity;
+      hornsFingers = 0;
       pose = null;
     }
     // While drawing, nothing may move the frame under the sketch.
@@ -421,7 +419,7 @@ export function createRecognizer(config = {}) {
   }
 
   /** UI snapshot: mode, effect and confidence must stay visible. */
-  const view = () => ({ state, rate, fine, angleDeg: angle, handedness, confidence, horns, hornsRatio, tapping, blade, tapRatio, chopTravel,
+  const view = () => ({ state, rate, fine, angleDeg: angle, handedness, confidence, horns, hornsFingers, tapping, blade, tapRatio, chopTravel,
     pose, drawing, penDown, pointer: pointer && { x: round(pointer.x), y: round(pointer.y) } });
 
   return { step, view };
