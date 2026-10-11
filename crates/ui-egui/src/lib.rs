@@ -1226,7 +1226,10 @@ impl FilmcraftApp {
         let mut fire = Vec::new();
         ctx.input_mut(|i| {
             let modifiers = i.modifiers;
-            clipboard_events_as_keys(&mut i.events, modifiers);
+            // Selected label text (e.g. a chat reply) keeps Cmd+C: Copy clips would overwrite the clipboard.
+            if !text_focus {
+                clipboard_events_as_keys(&mut i.events, modifiers);
+            }
             let panel = self.bindings.iter().filter(|b| b.3.as_deref() == Some(focused));
             let app_wide = self.bindings.iter().filter(|b| b.3.is_none());
             for (m, k, id, _) in panel.chain(app_wide) {
