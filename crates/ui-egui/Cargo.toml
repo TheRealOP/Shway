@@ -31,7 +31,9 @@ log = { workspace = true }
 rayon = { workspace = true }
 web-time = "1"
 # ArtCraft wordmark (PNG) for the About dialog and Home screen.
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# Shway camera tile: base64 JPEG previews over the control channel (camera.rs)
+base64 = "0.22"
 
 # Thread/process CPU clocks for frame-job profiling (safe wrappers; see frames.rs).
 [target.'cfg(unix)'.dependencies]

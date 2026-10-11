@@ -31,6 +31,7 @@ macro_rules! tlf {
 
 pub mod automation;
 pub mod brand;
+pub mod camera;
 mod cjk;
 pub mod control;
 pub mod crash;
@@ -275,6 +276,8 @@ pub struct FilmcraftApp {
     /// Keyboard Shortcuts dialog state.
     pub shortcut_editor: panels::shortcuts_dialog::EditorState,
     pub toast: Option<(String, f64)>,
+    /// Shway webcam preview (`ui.set {camera}`), shown as a corner tile.
+    pub camera: Option<camera::Tile>,
     pub tl: panels::timeline::TlState,
     /// Assistant panel requests in flight (its conversation is `ui.assistant`).
     pub assistant: panels::assistant::Client,
@@ -464,6 +467,7 @@ impl FilmcraftApp {
             bindings_rev: 0,
             shortcut_editor: Default::default(),
             toast: None,
+            camera: None,
             tl: Default::default(),
             assistant: Default::default(),
             command_inbox: None,
@@ -1426,6 +1430,8 @@ impl FilmcraftApp {
             state::Mode::Import => panels::import_mode::show(self, ui, body),
             state::Mode::Export => panels::export_mode::show(self, ui, body),
         }
+        let program = self.auto.find("panel.Program").map(|e| egui::Rect::from_min_size(egui::pos2(e.rect[0], e.rect[1]), egui::vec2(e.rect[2], e.rect[3])));
+        camera::show(self.camera.as_ref(), ui, body, program);
         panels::dialogs::show(self, &ctx);
         if !self.ui.show_status_bar {
             // no bar to draw the job in, but a finished preview render still plays
