@@ -43,6 +43,28 @@ sketch. Double tap no longer toggles playback; play/stop are spoken or keys. The
 
 The thumb–index tap replaced the handoff's thumb–middle tap at the creator's request (2026-10-11).
 
+## Sketch vocabulary (2026-10-11, DEV-93)
+
+One finished sketch, one edit. When a chat message arrives while a finished sketch (strokes, drawing
+off) is on the Program monitor, the assistant takes `ui.screenshot {panel:"program"}` (frame + ink)
+and asks the vision model (`gemini-3.1-pro-preview`) to **classify** it into a fixed enum. Code maps
+the figure to the effect; the chat model (Flash) only picks the clips through the `transition`
+action. "Use this video afterwards" = the named or selected clip plays right after the current one:
+one proposal holds `timeline.move` (only when that clip doesn't already follow) and
+`sequence.applyVideoTransition` at the cut, so preview, Accept/Reject and one undo work as for every
+assistant edit. The ink is cleared after Accept or Reject. Code: [shway/assistant.mjs](../../shway/assistant.mjs),
+step: `crates/engine/src/proposals.rs`.
+
+| Figure | Edit | Status |
+| --- | --- | --- |
+| `split_outward`: a line with two arrows pointing apart | `split` transition between the two clips | Verified in assistant, adapter and Rust proposal tests (fake editor and model); live drawing, vision reading and editor not verified |
+| `arrow_left` / `arrow_right` | `push` transition, that direction | Same as above |
+| `circle` | `iris_round` transition | Same as above |
+| `unknown` (or anything outside the enum) | Reply with what it saw; nothing changes; the sketch stays | Verified in assistant tests |
+
+Refusals are replies, not errors: an oversized Program picture (> 6 MB PNG), a stale revision, or
+the engine refusing the edit (no neighbouring clip, locked track) each say so and change nothing.
+
 ## State model
 
 Idle → Targeting → Armed → Adjusting → Preview → Committed. The recognizer adds a Fist state (paused, sliding).

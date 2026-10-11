@@ -3,7 +3,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer as tcp } from "node:net";
 import { createServer as http } from "node:http";
-import { createAssistant, fit, readInk, validateAction } from "./assistant.mjs";
+import { existsSync, writeFileSync } from "node:fs";
+import { createAssistant, fit, readInk, validateAction, SKETCH_MODEL } from "./assistant.mjs";
+import { MAX_IMAGE_BYTES } from "./gemini-server.mjs";
 
 const TPS = 254016000000, F = TPS / 30;
 const REQUIRED = ["project.inspect", "sequence.inspect", "timeline.select", "playhead.set", "edit.undo", "file.exportMedia", "jobs.list",
@@ -13,7 +15,7 @@ const REQUIRED = ["project.inspect", "sequence.inspect", "timeline.select", "pla
 const clip = (clip, item, link, start, dur, sourceIn, name) => ({ clip, item, link, name, start: start * F, duration: dur * F, sourceIn: sourceIn * F, sourceOut: (sourceIn + dur) * F });
 
 function fakeEditor() {
-  const st = { revision: 5, proposal: null, next: 1, history: [], previews: [], onPreview: null, playhead: 400 * F, playing: true, ui: [], ink: [], inkGate: null };
+  const st = { revision: 5, proposal: null, next: 1, history: [], previews: [], onPreview: null, playhead: 400 * F, playing: true, ui: [], ink: [], inkGate: null, shots: [], shotSize: 64 };
   const seq = () => ({
     id: 27, name: "Cut", duration: 450 * F, settings: { frame_rate: { num: 30, den: 1 } }, playhead: 0, selection: [],
     video: [{ id: 1, locked: false, items: [clip(10, 1, 1, 0, 300, 30, "C5500.MP4"), clip(12, 2, 2, 300, 150, 0, "C5517.MP4")] }],
@@ -61,7 +63,12 @@ function fakeEditor() {
         }
         let reply;
         try {
+          if (req.method === "ui.screenshot") { // desktop: the PNG is written to the given path
+            st.shots.push(req.params);
+            writeFileSync(req.params.path, Buffer.alloc(st.shotSize, 7));
+          }
           const result = req.method === "engine.commands" ? REQUIRED.map((id) => ({ id })) : req.method === "ui.inspect" ? { playhead: st.playhead }
+            : req.method === "ui.screenshot" ? { path: req.params.path, width: 8, height: 8 }
             : req.method === "ui.playback" ? (st.ui.push([req.params.action, req.params.speed]), st.playing = req.params.action === "play", { playing: st.playing, playhead: st.playhead })
             : exec(req.params.command, req.params.params);
           reply = { id: req.id, ok: true, result };
@@ -85,7 +92,8 @@ function fakeProxy() {
     const a = answers.shift();
     if (typeof a === "function") a();
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ json: A(typeof a === "function" ? answers.shift() : a) }));
+    const next = typeof a === "function" ? answers.shift() : a;
+    res.end(JSON.stringify({ json: next && "figure" in next ? next : A(next) })); // a sketch reading is sent as is
   });
   return { answers, prompts, server, hold() { let open; gate = new Promise((r) => (open = r)); return () => { gate = null; open(); }; } };
 }
@@ -416,4 +424,124 @@ test("/ink is hostile-input safe: caps 20 strokes × 500 points, drops bad point
     assert.equal((await s.call("/ink", b)).status, 400, JSON.stringify(b));
   assert.equal((await s.call("/ink", JSON.stringify({ strokes: [[["x".repeat(600 * 1024)]]] }))).status, 413);
   assert.deepEqual(readInk({}), { pointer: null, strokes: [], drawing: false });
+});
+
+// ---- Sketch → edit (DEV-93): a finished sketch is read by the vision model; code maps figure → transition.
+const SKETCH = { pointer: null, strokes: [[[0.5, 0.2], [0.5, 0.8]], [[0.45, 0.5], [0.3, 0.5]], [[0.55, 0.5], [0.7, 0.5]]], drawing: false };
+const seen = (figure, description = "a vertical line with arrows pointing apart") => ({ figure, description });
+
+test("sketch: split figure + 'use this video afterwards' → move then split in one preview; accept commits; ink cleared", async (t) => {
+  const s = await setup(); t.after(s.close);
+  await s.call("/ink", SKETCH);
+  s.proxy.answers.push(seen("split_outward"), { action: "transition", reply: "Splitting into the first clip.", from: 12, to: 10 });
+  const r = await s.call("/chat", { message: "use this video afterwards" });
+  assert.match(r.body.reply, /^Splitting into the first clip\. Preview ready/);
+  // The vision call: Program monitor screenshot + strokes, on the sketch model; the file is removed after.
+  assert.deepEqual(s.editor.shots.map((p) => p.panel), ["program"]);
+  assert.ok(!existsSync(s.editor.shots[0].path));
+  const vision = s.proxy.prompts[0];
+  assert.equal(vision.model, SKETCH_MODEL);
+  assert.deepEqual(vision.images, [{ mimeType: "image/png", data: Buffer.alloc(64, 7).toString("base64") }]);
+  assert.match(vision.prompt, /\[\[\[0\.5,0\.2\],\[0\.5,0\.8\]\]/);
+  assert.deepEqual(vision.schema.properties.figure.enum, ["split_outward", "arrow_left", "arrow_right", "circle", "unknown"]);
+  // The action picker is told the effect and the current clip (the sequence playhead is 0: clip 10).
+  assert.match(s.proxy.prompts[1].system, /a split transition.*CURRENT clip 10/);
+  assert.equal(s.proxy.prompts[1].model, undefined); // default (Flash) model
+  assert.deepEqual(s.editor.previews[0].steps, [
+    { command: "timeline.move", params: { clip: 10, anchor: 12, position: "after" } },
+    { command: "sequence.applyVideoTransition", params: { clip: 12, effect: "split", edge: "out" } },
+  ]);
+  assert.equal(s.editor.ink.length, 1);
+  const a = await s.call("/chat/accept", {});
+  assert.match(a.body.reply, /^Applied "Move C5500\.MP4 after C5517\.MP4, split between"\. It's one undo step\.$/);
+  assert.equal(s.editor.history.length, 1);
+  assert.deepEqual(s.editor.ink.at(-1), null);
+  // The camera keeps re-sending its stroke list: the decided strokes stay off; a new stroke shows.
+  await s.call("/ink", { ...SKETCH, pointer: [0.2, 0.2] });
+  assert.deepEqual(s.editor.ink.at(-1), { pointer: [0.2, 0.2], strokes: [], drawing: false });
+  const fresh = [[0.1, 0.1], [0.2, 0.2]];
+  await s.call("/ink", { ...SKETCH, strokes: [...SKETCH.strokes, fresh], drawing: true });
+  assert.deepEqual(s.editor.ink.at(-1).strokes, [fresh]);
+  await s.call("/ink", { pointer: null, strokes: [], drawing: false }); // the camera cleared: strokes count again
+  await s.call("/ink", SKETCH);
+  assert.deepEqual(s.editor.ink.at(-1), SKETCH);
+  await s.call("/ink", { pointer: null, strokes: [], drawing: false });
+  // The sketch is used up: the next message is a plain chat (no screenshot, no vision call).
+  s.proxy.answers.push({ action: "answer", reply: "Done." });
+  await s.call("/chat", { message: "thanks" });
+  assert.equal(s.editor.shots.length, 1);
+  assert.equal(s.proxy.prompts.length, 3);
+});
+
+test("sketch: an arrow maps to push with its direction (one step when the clip already follows); reject clears the ink", async (t) => {
+  const s = await setup(); t.after(s.close);
+  await s.call("/ink", SKETCH);
+  s.proxy.answers.push(seen("arrow_left", "an arrow pointing left"), { action: "transition", reply: "Pushing left.", from: 10, to: 12 });
+  await s.call("/chat", { message: "push to the next shot" });
+  assert.deepEqual(s.editor.previews[0].steps, [{ command: "sequence.applyVideoTransition", params: { clip: 10, effect: "push", edge: "out", direction: "left" } }]);
+  assert.equal(s.editor.previews[0].label, "Push from C5500.MP4 to C5517.MP4");
+  const r = await s.call("/chat/reject", {});
+  assert.match(r.body.reply, /^Discarded/);
+  assert.equal(s.editor.history.length, 0);
+  assert.deepEqual(s.editor.ink.at(-1), null);
+  // A circle is an iris (a fresh sketch, after the camera cleared the old one).
+  await s.call("/ink", { pointer: null, strokes: [], drawing: false });
+  await s.call("/ink", SKETCH);
+  s.proxy.answers.push(seen("circle", "a circle"), { action: "transition", reply: "Iris.", from: 10, to: 12 });
+  await s.call("/chat", { message: "iris into the next one" });
+  assert.equal(s.editor.previews[1].steps[0].params.effect, "iris_round");
+});
+
+test("sketch: an unknown figure is described and nothing changes; the ink stays for a redraw", async (t) => {
+  const s = await setup(); t.after(s.close);
+  await s.call("/ink", SKETCH);
+  s.proxy.answers.push(seen("unknown", "a smiley face"));
+  const r = await s.call("/chat", { message: "do this" });
+  assert.equal(r.body.reply, "I see a smiley face, but that isn't a sketch I know (split, arrow or circle). Nothing changed.");
+  assert.equal(r.body.pending, null);
+  assert.equal(s.proxy.prompts.length, 1);
+  assert.equal(s.editor.previews.length, 0);
+  assert.deepEqual(s.editor.ink, [SKETCH]);
+  // A figure outside the enum is not trusted either.
+  s.proxy.answers.push({ figure: "star", description: "x" });
+  assert.match((await s.call("/chat", { message: "do this" })).body.reply, /no known figure/);
+});
+
+test("sketch: only a finished sketch is read; without one a transition action is invalid", async (t) => {
+  const s = await setup(); t.after(s.close);
+  await s.call("/ink", { ...SKETCH, drawing: true }); // still drawing
+  s.proxy.answers.push({ action: "transition", reply: "x", from: 10, to: 12 }, { action: "answer", reply: "Draw it first." });
+  const r = await s.call("/chat", { message: "split here" });
+  assert.equal(r.body.reply, "Draw it first.");
+  assert.equal(s.editor.shots.length, 0);
+  assert.match(s.proxy.prompts[1].prompt, /transition needs a finished sketch/);
+  assert.doesNotMatch(s.proxy.prompts[0].system, /transition:/);
+});
+
+test("sketch: oversized Program picture is refused before the vision call", async (t) => {
+  const s = await setup(); t.after(s.close);
+  s.editor.shotSize = MAX_IMAGE_BYTES + 1;
+  await s.call("/ink", SKETCH);
+  const r = await s.call("/chat", { message: "use this video afterwards" });
+  assert.equal(r.status, 200);
+  assert.match(r.body.reply, /too large.*Nothing changed\.$/);
+  assert.equal(s.proxy.prompts.length, 0);
+  assert.ok(!existsSync(s.editor.shots[0].path));
+});
+
+test("sketch: stale revision and an engine refusal are friendly replies, not 502", async (t) => {
+  const s = await setup(); t.after(s.close);
+  await s.call("/ink", SKETCH);
+  s.proxy.answers.push(seen("split_outward"), () => { s.editor.revision++; }, { action: "transition", reply: "ok", from: 10, to: 12 });
+  let r = await s.call("/chat", { message: "use this video afterwards" });
+  assert.equal(r.status, 200);
+  assert.match(r.body.reply, /project changed.*send it again/);
+  // The engine's own (non-proposal) error for the transition is reported, and nothing is pending.
+  s.editor.onPreview = () => { throw new Error("sequence.applyVideoTransition: no edit point at the playhead on targeted tracks"); };
+  s.proxy.answers.push(seen("split_outward"), { action: "transition", reply: "ok", from: 10, to: 12 });
+  r = await s.call("/chat", { message: "use this video afterwards" });
+  assert.equal(r.status, 200);
+  assert.match(r.body.reply, /^The editor refused that transition \(.*no edit point.*\)\. Nothing changed\.$/);
+  assert.equal(r.body.pending, null);
+  assert.equal(s.editor.history.length, 0);
 });
