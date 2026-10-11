@@ -95,7 +95,7 @@ test("only 🤘 engages: a pinch, a thumb–middle pinch, a point or a fist don'
     assert.ok(!types(evs).includes("engage"), JSON.stringify(opts));
     assert.ok(!types(evs).includes("shuttle"), JSON.stringify(opts));
   }
-  assert.deepEqual(replay(frames(0, 600, () => ({ hand: hand({ pinch: true, twist: 40 }) }))), [], "pinch + twist does nothing");
+  assert.ok(!types(replay(frames(0, 600, () => ({ hand: hand({ pinch: true, twist: 40 }) })))).some((t) => t === "engage" || t === "shuttle"), "pinch + twist only draws");
   assert.equal(replay(frames(0, 100, () => ({ hand: hand({ pose: "horns" }) })))[0]?.type, "engage");
 });
 
@@ -250,32 +250,6 @@ const taps = (pattern, extra = {}, pinch = true) => {
   return out;
 };
 
-test("thumb–index double tap fires one draw-toggle", () => {
-  const evs = replay(taps([[0, 300], [1, 100], [0, 130], [1, 100], [0, 300]]));
-  assert.deepEqual(evs.map((e) => [e.type, e.drawing]), [["draw-toggle", true]]); // was a thumb–middle "double-tap" (play/pause) before Part 2
-});
-
-test("a thumb–middle double tap or a held pinch toggles nothing", () => {
-  assert.deepEqual(replay(taps([[0, 300], [1, 100], [0, 130], [1, 100], [0, 300]], {}, "middle")), [], "thumb–middle");
-  assert.deepEqual(replay(taps([[0, 300], [1, 2000], [0, 300]])), [], "held pinch, open hand");
-  assert.deepEqual(notPointer(replay(seq([[POINT, 300], [TAP, 1000], [POINT, 300]]))), [], "held pinch while pointing");
-});
-
-test("single, slow, or held taps are not a double tap", () => {
-  assert.deepEqual(replay(taps([[0, 300], [1, 100], [0, 600]])), [], "single");
-  assert.deepEqual(replay(taps([[0, 300], [1, 100], [0, 800], [1, 100], [0, 300]])), [], "gap too long");
-  assert.deepEqual(replay(taps([[0, 300], [1, 600], [0, 130], [1, 100], [0, 300]])), [], "first was a hold");
-});
-
-test("a tap interrupted by tracking loss does not pair up", () => {
-  const evs = replay([
-    ...taps([[0, 300], [1, 100], [0, 66]]),
-    { t: 520, hand: null },
-    ...taps([[1, 100], [0, 300]]).map((f) => ({ ...f, t: f.t + 553 })),
-  ]);
-  assert.deepEqual(evs, []);
-});
-
 test("a wrist flick (palm still, fingers swing down) cuts", () => {
   const still = frames(0, 300, () => ({ hand: hand({ twist: 75 }) }));
   const flick = frames(330, 150, (p) => ({ hand: hand({ twist: 75, bend: 70 * p }) }));
@@ -283,11 +257,6 @@ test("a wrist flick (palm still, fingers swing down) cuts", () => {
   // Motion blur drops a frame mid-flick.
   const blurred = flick.map((f, i) => (i === 2 ? { t: f.t, hand: null } : f));
   assert.deepEqual(types(replay([...still, ...blurred])), ["chop"]);
-});
-
-test("a sideways thumb–index double tap with noisy fingertip depth still fires", () => {
-  const evs = replay(taps([[0, 300], [1, 100], [0, 130], [1, 100], [0, 300]], { twist: 60, thumbZ: 0.03 }));
-  assert.deepEqual(evs.map((e) => [e.type, e.drawing]), [["draw-toggle", true]]); // was "double-tap" (play/pause) before Part 2
 });
 
 const chop = (t0, opts = {}) => frames(t0, 200, (p) => ({ hand: hand({ twist: 75, y: 0.3 + 0.3 * p, ...opts }) }));
@@ -354,7 +323,6 @@ const seq = (segments) => {
 };
 const notPointer = (evs) => evs.filter((e) => e.type !== "pointer");
 const POINT = { pose: "point" }, TAP = { pose: "point", pinch: true }, FIST = { pose: "fist" };
-const drawOn = [[POINT, 300], [TAP, 100], [POINT, 130], [TAP, 100]];
 
 test("point: the index tip drives a smoothed, mirrored 0–1 pointer, emitted on change only", () => {
   const r = createRecognizer();
@@ -369,35 +337,6 @@ test("point: the index tip drives a smoothed, mirrored 0–1 pointer, emitted on
   r.step({ t: 2000, hand: hand() });
   assert.equal(r.view().pointer, null, "an open hand hides the pointer");
   assert.equal(r.view().pose, "open");
-});
-
-test("draw-toggle and pen: point = pen down, other poses = pen up; the ending tap doesn't leave a stroke", () => {
-  const evs = replay(seq([
-    ...drawOn,
-    [(p) => ({ pose: "point", x: 0.5 + 0.1 * p }), 300], // stroke 1
-    [{}, 200], // open hand: pen up
-    [(p) => ({ pose: "point", y: 0.5 + 0.1 * p }), 300], // stroke 2
-    [TAP, 100], [POINT, 130], [TAP, 100], [POINT, 300], // double tap: drawing off
-  ]));
-  assert.deepEqual(notPointer(evs).map((e) => e.type + (e.drawing === undefined ? "" : ` ${e.drawing}`)),
-    ["draw-toggle true", "pen-down", "pen-up", "pen-down", "pen-up", "draw-toggle false"]);
-  const at = (type, n = 0) => evs.filter((e) => e.type === type)[n].t;
-  const inStroke = (a, b) => evs.filter((e) => e.type === "pointer" && e.t >= a && e.t <= b).length;
-  assert.ok(inStroke(at("pen-down"), at("pen-up")) >= 5, "stroke 1 has points");
-  assert.ok(inStroke(at("pen-down", 1), at("pen-up", 1)) >= 5, "stroke 2 has points");
-  // The first tap of "drawing off" lifts the pen on its first frame, and no stroke starts before the toggle.
-  assert.equal(at("pen-up", 1), seq([...drawOn, [POINT, 300], [{}, 200], [POINT, 300]]).at(-1).t + 33);
-});
-
-test("while drawing: a single tap lifts the pen briefly; a held pinch freezes the pointer and keeps the pen up", () => {
-  const all = replay(seq([...drawOn, [POINT, 300], [TAP, 100], [POINT, 600],
-    [(p) => ({ ...TAP, x: 0.5 - 0.2 * p }), 1000], [{ pose: "point", x: 0.3 }, 300]]));
-  const evs = notPointer(all);
-  assert.deepEqual(types(evs), ["draw-toggle", "pen-down", "pen-up", "pen-down", "pen-up", "pen-down"]);
-  const [, , up, down, up2, down2] = evs;
-  assert.ok(down.t - up.t >= 400 && down.t - up.t < 600, "pen back down once no second tap came");
-  assert.ok(!all.some((e) => e.type === "pointer" && e.t > up2.t && e.t < down2.t), "pointer frozen while the thumb is on the index");
-  assert.ok(down2.t - up2.t >= 990 && down2.t - up2.t < 1050, "a held pinch isn't a tap: the pen comes back as soon as it opens");
 });
 
 test("fist held → pause; opening the hand → release; slid fist → absolute slide offsets", () => {
@@ -437,25 +376,13 @@ test("no swipe while pointing or in a fist", () => {
   assert.deepEqual(types(replay(seq([[{}, 300], [fast({}), 200]]))), ["swipe"], "an open hand still swipes");
 });
 
-test("no slide (and no scrub) while drawing: a fist only pauses and lifts the pen", () => {
-  const evs = replay(seq([
-    ...drawOn, [POINT, 200],
-    [FIST, 300], [(p) => ({ pose: "fist", x: 0.5 - 0.2 * p }), 300], [{ pose: "fist", x: 0.3 }, 200],
-    [{ pose: "horns", twist: 40 }, 300], // 🤘 doesn't engage either
-  ]));
-  assert.deepEqual(types(notPointer(evs)), ["draw-toggle", "pen-down", "pen-up", "pause", "release"]);
-});
-
-test("fist: tracking loss latches until the fist opens; Esc cancels; Esc while drawing drops the sketch", () => {
+test("fist: tracking loss latches until the fist opens; Esc cancels", () => {
   const lost = replay([...seq([[FIST, 300]]), { t: 330, hand: null }, ...seq([[FIST, 400]]).map((f) => ({ ...f, t: f.t + 363 })),
     ...seq([[{}, 100], [FIST, 300]]).map((f) => ({ ...f, t: f.t + 800 }))]);
   assert.deepEqual(types(notPointer(lost)), ["pause", "tracking-lost", "pause"]);
   assert.ok(lost.at(-1).t >= 1050, "re-paused only after letting go");
   const esc = replay([...seq([[FIST, 300]]), { t: 330, hand: hand(FIST), cancel: true }, ...seq([[FIST, 300]]).map((f) => ({ ...f, t: f.t + 363 }))]);
   assert.deepEqual(types(esc), ["pause", "cancel"]);
-  const draw = seq([...drawOn, [POINT, 200]]);
-  const ink = notPointer(replay([...draw, { t: draw.at(-1).t + 33, hand: hand(POINT), cancel: true }, { t: draw.at(-1).t + 66, hand: hand(POINT) }]));
-  assert.deepEqual(types(ink), ["draw-toggle", "pen-down", "pen-up", "cancel"]);
 });
 
 const dir = new URL("./traces/", import.meta.url);
@@ -469,9 +396,27 @@ for (const name of recorded) {
   });
 }
 
-test("an open-palm wave (left-right-left) erases once and never swipes", () => {
+test("an open-palm wave (left-right-left) undoes once and never swipes", () => {
   const wave = frames(0, 700, (p) => ({ hand: hand({ x: 0.5 + 0.05 * Math.sign(Math.sin(p * 3.5 * Math.PI)) * Math.min(1, Math.abs(Math.sin(p * 3.5 * Math.PI)) * 3) }) }));
   const evs = replay([...frames(-300, 270, () => ({ hand: hand({ x: 0.5 }) })), ...wave]);
-  assert.deepEqual(types(evs), ["erase"]);
-  assert.deepEqual(replay(frames(0, 700, (p) => ({ hand: hand({ pose: "point", x: 0.5 + 0.05 * Math.sin(p * 3.5 * Math.PI) }) }))).filter((e) => e.type === "erase"), []);
+  assert.deepEqual(types(evs), ["undo"]);
+  assert.deepEqual(replay(frames(0, 700, (p) => ({ hand: hand({ pose: "point", x: 0.5 + 0.05 * Math.sin(p * 3.5 * Math.PI) }) }))).filter((e) => e.type === "undo"), []);
+});
+
+test("pinch draws: pen down while thumb and index touch, up when they part; pointing alone never draws", () => {
+  const evs = replay(seq([
+    [POINT, 300], // dot only
+    [(p) => ({ ...TAP, x: 0.5 + 0.1 * p }), 300], // stroke 1
+    [POINT, 200],
+    [(p) => ({ ...TAP, y: 0.5 + 0.1 * p }), 300], // stroke 2
+    [{}, 200],
+  ]));
+  assert.deepEqual(types(notPointer(evs)), ["pen-down", "pen-up", "pen-down", "pen-up"]);
+  const at = (type, n = 0) => evs.filter((e) => e.type === type)[n].t;
+  assert.ok(evs.filter((e) => e.type === "pointer" && e.t > at("pen-down") && e.t < at("pen-up")).length >= 5, "the pen moves with the pinch");
+});
+
+test("no slide or scrub while pinched: a pinch with a twist doesn't engage", () => {
+  const evs = types(replay(seq([[TAP, 300], [{ ...TAP, twist: 40 }, 300]])));
+  assert.ok(!evs.includes("engage") && !evs.includes("slide"));
 });

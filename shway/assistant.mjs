@@ -429,7 +429,8 @@ export function createCamera(transport, { connect = () => ShwayAdapter.connect(t
     for (const e of recognizer.step({ t, hand })) {
       changed = ink.event(e) || changed;
       if (TRACE && e.type !== "pointer") log(`gesture: ${JSON.stringify(e)}`);
-      if (TRANSPORT.has(e.type)) toBridge(e);
+      if (e.type === "undo") { if (ink.undo()) changed = true; else toBridge(e); }
+      else if (TRANSPORT.has(e.type)) toBridge(e);
     }
     if (ink.visible(recognizer.view().pointer !== null) || changed) sendInk(ink.state());
   };

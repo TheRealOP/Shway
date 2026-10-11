@@ -116,27 +116,32 @@ test("queued slides collapse to the latest; slides after release or without a pa
   assert.deepEqual(fresh.calls, []);
 });
 
-test("ink: pen strokes from pointer events; a new drawing replaces the sketch; cancel clears; caps 20 × 500", () => {
+test("ink: pinch strokes from pointer events; undo drops the last stroke; 🤘 sets scrub; cancel clears; caps 20 × 500", () => {
   const ink = createInk();
   const ev = (type, extra = {}) => ink.event({ type, t: 0, ...extra });
   ev("pointer", { x: 0.1, y: 0.1 });
-  ev("draw-toggle", { drawing: true });
-  ev("pen-down"); ev("pointer", { x: 0.2, y: 0.2 }); ev("pen-up");
+  ev("pen-down"); ev("pointer", { x: 0.2, y: 0.2 });
+  assert.equal(ink.state().drawing, true, "ring while pinched");
+  ev("pen-up");
   ev("pointer", { x: 0.5, y: 0.5 }); // pen up: moves the dot only
-  ev("pen-down"); ev("pointer", { x: 0.6, y: 0.6 });
-  assert.deepEqual(ink.state(), { pointer: [0.6, 0.6], strokes: [[[0.1, 0.1], [0.2, 0.2]], [[0.5, 0.5], [0.6, 0.6]]], drawing: true });
-  ev("draw-toggle", { drawing: false });
-  assert.equal(ink.state().strokes.length, 2, "a finished sketch stays");
+  ev("pen-down"); ev("pointer", { x: 0.6, y: 0.6 }); ev("pen-up");
+  assert.deepEqual(ink.state(), { pointer: [0.6, 0.6], strokes: [[[0.1, 0.1], [0.2, 0.2]], [[0.5, 0.5], [0.6, 0.6]]], drawing: false, scrub: false });
+  assert.equal(ink.undo(), true);
+  assert.equal(ink.state().strokes.length, 1, "undo drops the last stroke");
+  assert.equal(ink.undo(), true);
+  assert.equal(ink.undo(), false, "nothing left: the wave undoes the last edit instead");
+  assert.equal(ev("engage"), true);
+  assert.equal(ink.state().scrub, true, "🤘 recognised");
+  ev("release");
+  assert.equal(ink.state().scrub, false);
   assert.equal(ink.visible(false), true);
   assert.equal(ink.state().pointer, null);
   assert.equal(ink.visible(false), false, "no change, no send");
-  ev("draw-toggle", { drawing: true });
-  assert.deepEqual(ink.state().strokes, [], "a new drawing starts clean");
   for (let k = 0; k < 25; k++) { ev("pen-down"); for (let i = 0; i < 600; i++) ev("pointer", { x: k / 100, y: i / 600 }); ev("pen-up"); }
   const s = ink.state().strokes;
   assert.equal(s.length, 20);
   assert.ok(s.every((p) => p.length === 500));
   assert.equal(s[0][1][0], 0.05);
   ev("cancel");
-  assert.deepEqual(ink.state(), { pointer: [0.24, 599 / 600], strokes: [], drawing: false });
+  assert.deepEqual(ink.state(), { pointer: [0.24, 599 / 600], strokes: [], drawing: false, scrub: false });
 });
