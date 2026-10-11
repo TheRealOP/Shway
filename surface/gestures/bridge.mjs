@@ -1,6 +1,7 @@
 // @ts-check
 // Gesture events → editor calls through the Shway adapter (shway/adapter.ts). No engine access
-// beyond the adapter's typed methods; the recognizer stays editor-agnostic.
+// beyond the adapter's typed methods; the recognizer stays editor-agnostic. createInk turns the
+// pointer/pen events into the Program monitor's ink (`ui.set {ink}`); shway/assistant.mjs --camera uses both.
 
 /**
  * @typedef {{
@@ -70,5 +71,41 @@ export function createBridge(adapter, { onError } = {}) {
       default:
         return queue;
     }
+  };
+}
+
+const MAX_STROKES = 20, MAX_POINTS = 500; // the editor's caps (state::Ink)
+
+/** The sketch on the Program monitor, built from recognizer ink events: {pointer, strokes, drawing}, 0–1 frame coords. */
+export function createInk() {
+  /** @type {[number, number] | null} */ let pointer = null;
+  /** @type {[number, number][][]} */ let strokes = [];
+  let drawing = false, pen = false;
+  const clear = () => { strokes = []; drawing = pen = false; return true; };
+  return {
+    /** Applies one recognizer event; true when the ink changed. A new drawing replaces the old sketch; cancel (Esc) clears it. */
+    event(/** @type {any} */ e) {
+      switch (e?.type) {
+        case "pointer": {
+          pointer = [e.x, e.y];
+          const s = strokes.at(-1);
+          if (pen && s && s.length < MAX_POINTS) s.push(pointer);
+          return true;
+        }
+        case "pen-down":
+          pen = true;
+          strokes.push(pointer ? [pointer] : []);
+          if (strokes.length > MAX_STROKES) strokes.shift();
+          return true;
+        case "pen-up": pen = false; return false;
+        case "draw-toggle": drawing = e.drawing === true; pen = false; if (drawing) strokes = []; return true;
+        case "cancel": return clear();
+        default: return false;
+      }
+    },
+    /** The dot shows only while pointing: pass recognizer.view().pointer !== null each frame. */
+    visible(/** @type {boolean} */ on) { if (on || !pointer) return false; pointer = null; return true; },
+    clear,
+    state: () => ({ pointer, strokes: strokes.filter((s) => s.length), drawing }),
   };
 }

@@ -1,24 +1,27 @@
 #!/usr/bin/env node
 // Chat with the AI that edits your video in the Shway desktop editor. Node ≥ 23 (imports .ts), no packages.
-//   node shway/assistant.mjs [--port 8793] [--editor 127.0.0.1:9876] [--proxy http://127.0.0.1:8790] [--takes takes.json]
+//   node shway/assistant.mjs [--port 8793] [--editor 127.0.0.1:9876] [--proxy http://127.0.0.1:8790] [--takes takes.json] [--camera [index]]
 // Each message becomes ONE schema-validated action (answer | remove | trim | move | replace_take), mapped
 // to engine params here. Edits are staged with proposal.preview (expectedRevision) and only applied by
 // POST /chat/accept (proposal.commit: one undo step). The editor runs `filmcraft --control <port>`;
 // Gemini (and Jev for take choices) go through shway/gemini-server.mjs, which holds the keys.
+// --camera runs the webcam worker (shway/hands.py, via uv) and handles its hand gestures in-process.
+import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { connect } from "node:net";
 import { readFileSync } from "node:fs";
+import { createInterface } from "node:readline";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { allowedOrigin } from "./gemini-server.mjs";
 import { AdapterError, ShwayAdapter, binItem } from "./adapter.ts";
 import { geminiGenerate, jevDecide, proposeReplacement } from "./replace.ts";
-import { createBridge } from "../surface/gestures/bridge.mjs";
+import { createBridge, createInk } from "../surface/gestures/bridge.mjs";
+import { createRecognizer } from "../surface/gestures/recognizer.mjs";
 
 const TPS = 254016000000;
 const MAX_BODY = 64 * 1024;
-const MAX_INK_BODY = 512 * 1024; // 20 strokes × 500 points of [x, y]
-const MAX_STROKES = 20, MAX_POINTS = 500;
+const MAX_PREVIEW = 200 * 1024; // base64 camera preview, the editor's cap (ui-egui camera.rs)
 const MAX_MESSAGES = 200; // ponytail: in-memory, lost on restart; persist per project if creators need history
 const MAX_LINE = 64 * 1024 * 1024;
 const MAX_CLIP_TEXT = 600;
@@ -269,7 +272,7 @@ export function createAssistant({ editor = "127.0.0.1:9876", proxy = "http://127
 
   // ---- Review playback (DEV-113): stop captures a moment; the next explanation is one note bound to it.
   // Transport/stop/cancel skip the busy lock so scrubbing works while the model thinks.
-  let moment = null, bridge = null, bridgeError = null;
+  let moment = null;
   async function review(route, body) {
     const a = await getAdapter();
     if (route === "/review/stop") {
@@ -280,12 +283,8 @@ export function createAssistant({ editor = "127.0.0.1:9876", proxy = "http://127
       moment = { revision: project.revision, playhead, clip: clipAt(sequence, playhead) };
       return { moment };
     }
-    if (route === "/review/cancel") { await resume(true); return { resumed: true }; }
-    bridge ??= createBridge(a, { onError: (e) => { bridgeError = e; } });
-    bridgeError = null;
-    await bridge(body.event);
-    if (bridgeError) throw new HttpError(502, `${body.event.type}: ${bridgeError.message ?? bridgeError}`);
-    return { ok: true };
+    await resume(true); // /review/cancel
+    return { resumed: true };
   }
   /** Stops playback and words the note with its moment and any range the creator scrubbed while talking. */
   async function reviewMessage({ moment: m, transcript, gestures }) {
@@ -297,18 +296,6 @@ export function createAssistant({ editor = "127.0.0.1:9876", proxy = "http://127
     const marked = now !== m.playhead && gestures.some((g) => ["shuttle", "step", "swipe"].includes(g.type));
     const range = marked ? `, marking ${sec(Math.min(m.playhead, now))}–${sec(Math.max(m.playhead, now))} s` : "";
     return `Review note at ${sec(m.playhead)} s${m.clip != null ? ` on clip ${m.clip}` : ""}${range}: ${transcript}`;
-  }
-  // ---- Ink (DEV-91): the camera page's pointer and sketch → ui.set {ink} on the Program monitor.
-  // Skips the busy lock; while one ui.set is in flight, newer bodies replace each other and only the latest goes next.
-  let inkLatest = null, inkSending = null;
-  function sendInk(ink) {
-    inkLatest = ink;
-    inkSending ??= (async () => {
-      try {
-        while (inkLatest) { const i = inkLatest; inkLatest = null; await transport.request("ui.set", { ink: i }); }
-      } finally { inkSending = null; }
-    })();
-    return inkSending;
   }
   /** After accept, reject or cancel: play on (reject/cancel first return to the stopped moment). */
   async function resume(back) {
@@ -338,13 +325,12 @@ export function createAssistant({ editor = "127.0.0.1:9876", proxy = "http://127
       if (!route) throw new HttpError(404, `use GET /chat/state or POST /chat, /chat/accept, /chat/reject, ${Object.keys(REVIEW).join(", ")}`);
       let size = 0;
       const chunks = [];
-      const limit = route === "/ink" ? MAX_INK_BODY : MAX_BODY;
       for await (const c of req) {
         size += c.length;
-        if (size > 4 * limit) return req.destroy();
-        if (size <= limit) chunks.push(c);
+        if (size > 4 * MAX_BODY) return req.destroy();
+        if (size <= MAX_BODY) chunks.push(c);
       }
-      if (size > limit) throw new HttpError(413, "request body too large");
+      if (size > MAX_BODY) throw new HttpError(413, "request body too large");
       const text = Buffer.concat(chunks).toString("utf8");
       let body;
       try { body = text.trim() ? JSON.parse(text) : {}; } catch { throw new HttpError(400, "invalid JSON"); }
@@ -352,9 +338,7 @@ export function createAssistant({ editor = "127.0.0.1:9876", proxy = "http://127
       const allowed = route === "/chat" ? ["message"] : REVIEW[route] ?? [];
       for (const k of Object.keys(body)) if (!allowed.includes(k)) throw new HttpError(400, `unsupported field ${k}`);
       if (route === "/chat" && (typeof body.message !== "string" || !body.message.trim() || body.message.length > 2000)) throw new HttpError(400, "message must be 1–2000 characters");
-      if (route === "/review/transport") body = { event: readTransport(body.event) };
       if (route === "/review/note") body = readNote(body);
-      if (route === "/ink") { await sendInk(readInk(body)); return send(200, { ok: true }); }
       if (route.startsWith("/review/") && route !== "/review/note") return send(200, await review(route, body));
       if (busy) throw new HttpError(409, "busy with the previous request; try again when it finishes");
       busy = true;
@@ -387,36 +371,10 @@ class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 
-// ---- Lock-free routes (DEV-113 review, DEV-91 ink): fields per route, and the boundary checks for their bodies.
-const REVIEW = { "/review/stop": [], "/review/cancel": [], "/review/transport": ["event"], "/review/note": ["moment", "transcript", "gestures"],
-  "/ink": ["pointer", "strokes", "drawing"] };
-const TRANSPORT = ["engage", "shuttle", "step", "release", "cancel", "tracking-lost", "swipe", "pause", "slide"];
+// ---- Lock-free review routes (DEV-113): fields per route, and the boundary checks for their bodies.
+const REVIEW = { "/review/stop": [], "/review/cancel": [], "/review/note": ["moment", "transcript", "gestures"] };
 const bad = (m) => { throw new HttpError(400, m); };
 const isObj = (v) => v && typeof v === "object" && !Array.isArray(v);
-
-/** A recognizer event (surface/gestures) for the bridge; chop is a cut and belongs to POST /review/cut. */
-export function readTransport(e) {
-  if (!isObj(e)) bad("event must be an object");
-  if (e.type === "chop") bad("chop is a cut: POST /review/cut");
-  if (!TRANSPORT.includes(e.type)) bad(`event.type must be one of ${TRANSPORT.join(", ")}`);
-  if (e.type === "shuttle" && !(typeof e.rate === "number" && Number.isFinite(e.rate) && Math.abs(e.rate) <= 8)) bad("shuttle rate must be a number within ±8");
-  if (e.type === "step" && !(Number.isSafeInteger(e.frames) && e.frames !== 0 && Math.abs(e.frames) <= 1000)) bad("step frames must be a nonzero integer within ±1000");
-  if (e.type === "swipe" && !["left", "right"].includes(e.direction)) bad("swipe direction must be left or right");
-  if (e.type === "slide" && !(typeof e.seconds === "number" && Number.isFinite(e.seconds) && Math.abs(e.seconds) <= 600)) bad("slide seconds must be a number within ±600");
-  return { type: e.type, ...(e.type === "shuttle" && { rate: e.rate }), ...(e.type === "step" && { frames: e.frames }), ...(e.type === "swipe" && { direction: e.direction }),
-    ...(e.type === "slide" && { seconds: e.seconds }) };
-}
-
-/** {pointer: [x, y] | null, strokes: [[[x, y], …], …], drawing} in 0–1 frame coordinates. Keeps the last 20 strokes,
- * the first 500 valid points of each; drops non-finite or out-of-range points and strokes left empty. */
-export function readInk({ pointer = null, strokes = [], drawing = false }) {
-  const point = (p) => Array.isArray(p) && p.length === 2 && p.every((v) => typeof v === "number" && v >= 0 && v <= 1);
-  if (pointer !== null && !point(pointer)) bad("pointer must be null or [x, y] within 0–1");
-  if (!Array.isArray(strokes) || strokes.length > 1000 || strokes.some((s) => !Array.isArray(s))) bad("strokes must be an array of point arrays");
-  if (typeof drawing !== "boolean") bad("drawing must be true or false");
-  const kept = strokes.map((s) => s.filter(point).slice(0, MAX_POINTS).map(([x, y]) => [x, y])).filter((s) => s.length).slice(-MAX_STROKES);
-  return { pointer: pointer && [pointer[0], pointer[1]], strokes: kept, drawing };
-}
 
 /** {moment: {revision, playhead, clip}, transcript, gestures?} as returned by /review/stop plus what was said. */
 export function readNote({ moment: m, transcript, gestures = [] }) {
@@ -435,13 +393,75 @@ export function clipAt(sequence, t) {
   return null;
 }
 
+// ---- Camera (DEV-91): the webcam worker's lines → recognizer → editor, in-process (no browser page).
+const TRANSPORT = new Set(["engage", "shuttle", "step", "release", "cancel", "tracking-lost", "swipe", "pause", "slide"]);
+
+/** Latest wins: while one call runs, newer values replace each other and only the newest goes next. */
+function latest(fn) {
+  let next, waiting = false, running = false;
+  return (v) => {
+    next = v; waiting = true;
+    if (running) return;
+    running = true;
+    (async () => { while (waiting) { waiting = false; await fn(next); } running = false; })();
+  };
+}
+
+/**
+ * Returns feed(line) for shway/hands.py's JSON lines; feed(null) = the hand is gone (worker died). Frames go
+ * through the recognizer: transport events to the bridge (in order), pointer/pen/draw events to the ink and
+ * `ui.set {ink}`, previews to `ui.set {camera}` (both latest wins, so a busy editor only gets the newest).
+ * Chop isn't wired: gesture cuts are parked (DEV-114).
+ */
+export function createCamera(transport, { connect = () => ShwayAdapter.connect(transport), log = console.warn } = {}) {
+  let said = "", t = 0, bridge = null;
+  const warn = (m) => { if (m !== said) log((said = m)); };
+  const recognizer = createRecognizer(), ink = createInk();
+  const uiSet = (params) => transport.request("ui.set", params).then(() => { said = ""; }, (e) => warn(`camera: ${e?.message ?? e}`));
+  const sendInk = latest((i) => uiSet({ ink: i })), sendPreview = latest((jpeg) => uiSet({ camera: jpeg }));
+  const toBridge = (e) => {
+    bridge ??= connect().then((a) => createBridge(a, { onError: (err, ev) => warn(`camera: ${ev.type}: ${err?.message ?? err}`) }));
+    bridge.then((b) => b(e), (err) => { bridge = null; warn(`camera: ${err?.message ?? err}`); });
+  };
+  const step = (hand) => {
+    let changed = false;
+    for (const e of recognizer.step({ t, hand })) {
+      changed = ink.event(e) || changed;
+      if (TRANSPORT.has(e.type)) toBridge(e);
+    }
+    if (ink.visible(recognizer.view().pointer !== null) || changed) sendInk(ink.state());
+  };
+  return (line) => {
+    if (line === null) { t += 1; return step(null); } // tracking loss: stops a shuttle, lifts the pen, hides the dot
+    let m;
+    try { m = JSON.parse(line); } catch { return; }
+    if (!isObj(m)) return;
+    if (typeof m.error === "string") return log(`camera: ${m.error}`);
+    if (typeof m.preview === "string") { if (m.preview.length <= MAX_PREVIEW) sendPreview(m.preview); return; }
+    if (Number.isFinite(m.t) && "hand" in m) { t = m.t; step(m.hand); }
+  };
+}
+
+/** Runs the webcam worker (uv run shway/hands.py [index]) into createCamera. If it dies, chat keeps working. */
+export function startCamera(transport, { args = [], log = console.warn } = {}) {
+  const feed = createCamera(transport, { log });
+  const child = spawn("uv", ["run", fileURLToPath(new URL("./hands.py", import.meta.url)), ...args], { stdio: ["ignore", "pipe", "inherit"] });
+  createInterface({ input: child.stdout }).on("line", feed);
+  child.on("error", (e) => log(`camera: could not start uv (${e.message}); install uv or run without --camera`));
+  child.on("exit", (code, signal) => { feed(null); log(`camera: worker exited (${signal ?? `code ${code}`}); chat still works, restart the assistant to retry`); });
+  process.once("exit", () => child.kill());
+  return child;
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const arg = (name, fallback) => { const i = process.argv.indexOf(name); return i > 0 ? process.argv[i + 1] : fallback; };
   const port = Number(arg("--port", 8793));
   const takesFile = arg("--takes", null);
   const takes = takesFile ? JSON.parse(readFileSync(takesFile, "utf8")) : null;
-  const opts = { editor: arg("--editor", "127.0.0.1:9876"), proxy: arg("--proxy", "http://127.0.0.1:8790"), takes };
+  const editor = arg("--editor", "127.0.0.1:9876"), camera = process.argv.indexOf("--camera");
+  const opts = { editor, proxy: arg("--proxy", "http://127.0.0.1:8790"), takes, transport: controlTransport(editor) };
   createAssistant(opts).listen(port, "127.0.0.1", () => {
-    console.log(`Shway assistant on http://127.0.0.1:${port} (editor ${opts.editor}, proxy ${opts.proxy}${takes ? `, ${takes.length} takes` : ""})`);
+    console.log(`Shway assistant on http://127.0.0.1:${port} (editor ${opts.editor}, proxy ${opts.proxy}${takes ? `, ${takes.length} takes` : ""}${camera > 0 ? ", camera" : ""})`);
   });
+  if (camera > 0) startCamera(opts.transport, { args: /^\d+$/.test(process.argv[camera + 1] ?? "") ? [process.argv[camera + 1]] : [] });
 }
