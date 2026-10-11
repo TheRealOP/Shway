@@ -35,16 +35,22 @@ export function segment(clip, words) {
   return out;
 }
 
+/** A clip's media file: <clip>.MP4 (Sony) or <clip>.MOV (iPhone). */
+export const mediaFile = (mediaDir, clip) => resolve(mediaDir, readdirSync(mediaDir).find((f) => /\.(mp4|mov)$/i.test(f) && basename(f).replace(/\.\w+$/, "") === clip) ?? `${clip}.MP4`);
+
 /**
- * When the camera recorded a clip: Sony's <clip>M01.XML sidecar CreationDate, in ms; null if absent.
- * Segments are numbered in this order, so segment numbers ARE the chronology.
+ * When the camera recorded a clip, in ms; null if unknown: Sony's <clip>M01.XML sidecar CreationDate,
+ * else the QuickTime creation date (iPhone). Segments are numbered in this order, so segment numbers ARE the chronology.
  */
 export function recordedAt(mediaDir, clip) {
-  try {
-    const m = /CreationDate value="([^"]+)"/.exec(readFileSync(join(mediaDir, `${clip}M01.XML`), "utf8"));
-    const t = m ? Date.parse(m[1]) : NaN;
-    return Number.isFinite(t) ? t : null;
-  } catch { return null; }
+  let date = null;
+  try { date = /CreationDate value="([^"]+)"/.exec(readFileSync(join(mediaDir, `${clip}M01.XML`), "utf8"))?.[1]; } catch {}
+  if (!date) try {
+    const tags = JSON.parse(execFileSync("ffprobe", ["-v", "error", "-show_entries", "format_tags", "-of", "json", mediaFile(mediaDir, clip)], { encoding: "utf8" })).format?.tags ?? {};
+    date = tags["com.apple.quicktime.creationdate"] ?? tags.creation_time;
+  } catch {}
+  const t = date ? Date.parse(date) : NaN;
+  return Number.isFinite(t) ? t : null;
 }
 /** Clips by recording time; clips without a time keep file-name order after the timed ones. */
 export function chronological(clips, timeOf) {
@@ -52,7 +58,7 @@ export function chronological(clips, timeOf) {
 }
 
 /** Every number exists, appears once, in increasing (recording) order, total words in budget; an error string or null. */
-export function validatePlan(plan, segments, words = [500, 1600]) {
+export function validatePlan(plan, segments, words = [500, 2000]) {
   const count = segments.length;
   if (!plan || typeof plan.title !== "string" || !plan.title.trim() || !Array.isArray(plan.sections) || !plan.sections.length) return "need a title and a non-empty sections array";
   const seen = new Set();
@@ -98,7 +104,7 @@ async function plan(segFile, clipsFile, outFile, url) {
     ...segments.map((s, i) => `[${i + 1}] (${s.clip}, ${wordCount(s.text)}w) ${s.text}`),
     "", "Build a horizontal long-form YouTube video that tells the weekend as it happened: choose which segments to keep and group them into chronological sections (start, build, setbacks, finish).",
     "List segment numbers in increasing order only; never move a later moment earlier. Prefer runs of consecutive numbers so lines are not chopped mid-thought; skip filler, mumbling and unintelligible lines.",
-    "Let the content decide the length within 600–1500 spoken words in total (about 4–10 minutes); add up the word counts shown as (Nw). Give a short reason per segment, a working title, and a one-sentence explanation of the chosen length.",
+    "Let the content decide the length within 600–1900 spoken words in total (about 4–13 minutes); add up the word counts shown as (Nw). Give a short reason per segment, a working title, and a one-sentence explanation of the chosen length.",
   ].join("\n");
   const schema = {
     type: "object", required: ["title", "lengthReason", "sections"], properties: {
@@ -133,7 +139,7 @@ function assemble(segFile, planFile, mediaDir, project, cutFile, cliPath) {
   const t0 = Date.now();
   const ranges = toRanges(readJson(planFile), readJson(segFile));
   const clips = [...new Set(ranges.map((r) => r.clip))].sort();
-  const imported = run("--save-as", project, "import", ...clips.map((c) => resolve(mediaDir, `${c}.MP4`)));
+  const imported = run("--save-as", project, "import", ...clips.map((c) => mediaFile(mediaDir, c)));
   if (imported.errors?.length || imported.items?.length !== clips.length) throw new Error(`import failed: ${JSON.stringify(imported)}`);
   const item = Object.fromEntries(clips.map((c, i) => [c, imported.items[i]]));
   run("--project", project, "--save", "exec", "file.newSequence", JSON.stringify({ name: "Long-form cut", width: 1920, height: 1080, fps: 59.94, sampleRate: 48000 }));
@@ -141,7 +147,7 @@ function assemble(segFile, planFile, mediaDir, project, cutFile, cliPath) {
   const rate = inspected.sequence.settings.frame_rate, seq = inspected.sequence.id, revision = inspected.project.revision;
   const [num, den, tps] = [BigInt(rate.num), BigInt(rate.den), BigInt(TPS)];
   const placed = ranges.map((r) => {
-    const dur = BigInt(run("probe", resolve(mediaDir, `${r.clip}.MP4`)).duration);
+    const dur = BigInt(run("probe", mediaFile(mediaDir, r.clip)).duration);
     const a = alignRange({ item: item[r.clip], sourceIn: Math.round(r.sourceIn), sourceOut: Math.round(Math.min(r.sourceOut, Number(dur))) }, rate);
     // Widening may pass the source end: clamp to its last whole frame (same ceil tick-of-frame as alignRange).
     const last = (dur * num / (tps * den) * tps * den + num - 1n) / num;
@@ -213,7 +219,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     if (cmd === "segments") {
       const media = opt("--media", null);
       const time = (c) => (media ? recordedAt(media, c) : null);
-      const clips = chronological(readdirSync(a[0]).filter((f) => /^C\d+\.json$/.test(f)).map((f) => basename(f, ".json")), time);
+      const clips = chronological(readdirSync(a[0]).filter((f) => /^(C|IMG_)\d+\.json$/.test(f)).map((f) => basename(f, ".json")), time);
       const segs = clips.flatMap((c) => segment(c, readJson(join(a[0], `${c}.json`)).words).map((s) => ({ ...s, recordedAt: time(c) == null ? null : new Date(time(c)).toISOString() })));
       writeFileSync(a[1], JSON.stringify(segs, null, 1));
       process.stderr.write(`${segs.length} segments from ${clips.length} clips (${clips.filter((c) => time(c) != null).length} with recording times)\n`);
