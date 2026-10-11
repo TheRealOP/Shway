@@ -90,10 +90,8 @@ export function drawOverlay(canvas, hand, v, now, flash) {
     g.fillStyle = "#fc3"; g.beginPath(); g.arc(P[4].x, P[4].y, 10, 0, 7); g.fill();
   }
   if (!engaged) {
-    // 🤘 meter: thumb–middle line + ring that fills as the thumb closes on the middle and ring tips.
-    const fill = Number.isFinite(v.hornsRatio) ? Math.max(0, Math.min(1, (1.2 - v.hornsRatio) / (1.2 - C.hornsOn))) : 0;
-    g.strokeStyle = fill >= 1 ? "#2c9" : "rgba(255,255,255,0.7)"; g.lineWidth = 2; g.setLineDash([4, 4]);
-    g.beginPath(); g.moveTo(P[4].x, P[4].y); g.lineTo(P[12].x, P[12].y); g.stroke(); g.setLineDash([]);
+    // 🤘 meter: ring fills a quarter per finger in place (index + pinky up, middle + ring down).
+    const fill = Number.isFinite(v.hornsFingers) ? Math.max(0, Math.min(1, v.hornsFingers / 4)) : 0;
     g.strokeStyle = "rgba(255,255,255,0.25)"; g.lineWidth = 8;
     g.beginPath(); g.arc(cx, cy, R * 0.6, 0, 7); g.stroke();
     g.strokeStyle = v.horns ? "#2c9" : "rgba(255,255,255,0.85)";

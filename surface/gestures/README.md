@@ -31,7 +31,7 @@ All thresholds are in `DEFAULTS` so they can be tuned on camera.
 | **Fist** (all four curled) held ≥ `fistHoldMs` 150 | `pause`; open the hand → `release` (stays paused). A fist passed through between poses does nothing | Verified (replay) |
 | **Fist slid left/right** | `slide {seconds}`: palm x (wrist / middle-knuckle midpoint) offset from where the fist closed, mirrored, EMA-smoothed, dead zone `slideDeadZone` 0.03 of the box, `slideGain` 20 s per box width, quantized to `slideStep` 0.05 s, emitted on change. Absolute, so no drift | Verified (replay) |
 | **Fist while drawing** | `pen-up` + `pause` only: no slide (and no 🤘 engage) while drawing, so the frame doesn't move under the sketch | Verified (replay) |
-| **🤘 held** (index + pinky out, middle + ring curled, thumb on both their tips) | `engage`; twist / Shift / loss exactly as before. Ratio = farther of thumb–middle and thumb–ring tip distance / palm, engage < `hornsOn` 0.35, release > `hornsOff` 0.5 | Verified (replay) |
+| **🤘 held** (index + pinky out, middle + ring curled; the thumb is ignored) | `engage`; twist / Shift / loss exactly as before. Releases when any of the four fingers leaves its position. The thumb-on-tips requirement was dropped because live the 🤘 didn't register; `view().hornsFingers` (0–4) shows how many fingers are in place | Verified (replay) |
 | **Esc** | `cancel`: in a fist or 🤘 it latches and the bridge returns to where it started; while drawing it drops the sketch | Verified (replay) |
 
 Not verified: any of it with a live camera (thresholds, mirroring, the thumb–index double tap while
@@ -104,7 +104,7 @@ serve it, and open `demo.html` (see [surface](../README.md)). `camera.html?edito
 import { createRecognizer } from "./recognizer.mjs";
 const r = createRecognizer(/* optional overrides of DEFAULTS */);
 for (const e of r.step(frame)) adapter(e);   // frame: {t, hand, key, fine, cancel}
-r.view();  // {state, rate, fine, angleDeg, handedness, confidence, horns, hornsRatio, tapping, blade, tapRatio, chopTravel, pose, drawing, penDown, pointer} for on-screen feedback
+r.view();  // {state, rate, fine, angleDeg, handedness, confidence, horns, hornsFingers, tapping, blade, tapRatio, chopTravel, pose, drawing, penDown, pointer} for on-screen feedback
 ```
 
 `camera.html` exposes `window.shwayGestures.setSink(fn)` to replace its log sink.
