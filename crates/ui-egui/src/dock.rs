@@ -273,7 +273,7 @@ pub fn workspace(name: &str) -> DockNode {
         // the Project bin as a narrow column on its left. Every other panel is in its usual place
         // but hidden (View ▸ Panels shows it).
         "Shway" => vsplit(
-            FixedB(300.0),
+            FixedB(260.0),
             hsplit(
                 FixedB(340.0),
                 hsplit(Ratio(0.5), hidden_tabs(&[Source, EffectControls, AudioClipMixer, Metadata]), tabs(&[Program], 0)),
