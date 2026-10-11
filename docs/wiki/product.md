@@ -21,7 +21,8 @@ Demonstrate one successful local replacement such as:
 “That sounds rehearsed; use the take where I laugh, then show the result.”
 
 After that works, add one exposure adjustment, dialogue-aware music refinement,
-one corrected gesture sensitivity profile, and TRIBE analysis of actual rendered versions.
+one corrected gesture sensitivity profile, and TRIBE analysis of actual rendered versions
+(TRIBE is tabled for the hackathon; see [Decisions](decisions.md)).
 
 ## Creative intent
 

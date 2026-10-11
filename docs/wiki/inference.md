@@ -63,6 +63,8 @@ enforces it).
 
 ## TRIBE flow
 
+Tabled for the hackathon (October 11, 2026): too slow for the time left. See [Decisions](decisions.md).
+
 1. Render the actual version, including accepted cuts, effects, and sound.
 2. Submit the render to the separate Python GPU worker.
 3. Load pretrained TRIBE v2 and generate predicted cortical responses over time.
