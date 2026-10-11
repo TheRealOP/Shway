@@ -1,4 +1,4 @@
-// Browser-only camera pieces shared by camera.html and ../demo.html: open the camera, run MediaPipe
+// Browser-only camera pieces for ../demo.html (the Part 1 web demo): open the camera, run MediaPipe
 // Hand Landmarker (Apache-2.0, loaded from public CDNs at runtime; nothing vendored), draw the overlay.
 import { DEFAULTS as C } from "./recognizer.mjs";
 

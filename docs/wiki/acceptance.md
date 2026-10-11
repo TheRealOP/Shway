@@ -104,7 +104,7 @@ Remove protected upstream branding from modified distributions.
   then replaced it, and rejecting restored the accepted timeline exactly.
 - 21 chain gates + 15 foundation gates passed. The export still transcribes as the corrected cut.
 
-**Review playback (DEV-113), 2026-10-11 — partly verified.** `surface/review.html` (logic `surface/review.mjs`) is a camera/mic remote for the desktop editor via `shway/assistant.mjs` `POST /review/stop|transport|note|cancel`. Push-to-talk start is the stop (soundtrack audio is only recorded while talk is held); a leading spoken "stop" is dropped from the note, "stop" alone just stops.
+**Review playback (DEV-113), 2026-10-11 — partly verified.** (Later on 2026-10-11 the browser page and `/review/transport` were removed; the camera now runs natively through `assistant.mjs --camera`, see [interactions](interactions.md). Voice awaits the native path.) `surface/review.html` (logic `surface/review.mjs`) is a camera/mic remote for the desktop editor via `shway/assistant.mjs` `POST /review/stop|transport|note|cancel`. Push-to-talk start is the stop (soundtrack audio is only recorded while talk is held); a leading spoken "stop" is dropped from the note, "stop" alone just stops.
 - **Verified:** 16 assistant tests + 5 review tests (`node --test`); removing the stale-revision check or the resume seek fails tests.
 - **Verified live** (release `filmcraft --demo --control 9881`, assistant :8799, Gemini proxy :8790): `/review/stop` paused and returned `{revision, playhead, clip}`; playback stayed paused; `/review/transport` step moved the playhead 24 frames; `/review/note` reached Gemini with "Review note at 1.29 s on clip 29, marking 1.29–2.29 s: …" shown in `/chat/state`; nothing was applied (revision unchanged).
 - **Not verified:** a committed review proposal live (the demo project's sync-locked tracks made the engine refuse remove/trim; a remove refusal surfaces as 502, pre-existing /chat behaviour), resume-after-accept against the real editor (tests only), the page in a browser, camera, microphone and transcription.
@@ -161,3 +161,13 @@ Final gates actually run: `cargo test -p filmcraft-engine` (461 passed, 3 ignore
 `node --test shway/*.test.ts shway/*.test.mjs surface/*.test.mjs surface/gestures/*.test.mjs surface/voice/*.test.mjs`
 (193 passed). Relative documentation links and `git diff --check` checked. Full workspace CI was
 not run. No Linear status change was made during verification.
+
+**Main integration, 2026-10-11.** Integrated newer native camera, held-pinch/undo-wave and typed
+transition changes from main (`3cbdf0c`). The worker uses the same bounded `updateInk` ingress as
+remote ink; accepting/rejecting consumes only submitted native strokes. Typed transitions retain
+the rendered vision inspection. The optional browser page is a timed-image viewer only, with no
+camera/microphone dependencies. Verified native callback → paused frame → multimodal proposal,
+retained newer strokes/undo-wave behavior, typed transition validation and the rendered viewer
+fixture. Merged suites: 182 Node tests, 461 engine tests (3 ignored), engine Clippy, formatting,
+WASM (42 crates), layering and attribution passed. The smaller Node count reflects upstream
+retirement of the browser review controller tests. Live camera/provider quality remains unverified.

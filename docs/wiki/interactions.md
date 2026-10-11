@@ -29,19 +29,27 @@ One gesture, one meaning. Thresholds live in `DEFAULTS` in
 | Hand | Mode | Effect | Status |
 | --- | --- | --- | --- |
 | Index out, other fingers curled ("point") | Laser pointer (default) | A dot follows the fingertip over the Program monitor picture | Verified in replay tests; live camera not verified |
-| Quick thumb–index **double tap** | Draw toggle | 1st: drawing on, point = pen down, any other pose = pen up. 2nd: sketch finished, stays on screen, back to laser pointer. A held pinch does nothing; the tap freezes the pointer and lifts the pen | Verified in replay tests; live camera not verified |
+| Thumb–index pinch held | Freehand pen down; releasing finishes the stroke | Pinch flicker below three points is dropped; a finished sketch stays until consumed or undone | Verified in replay/native callback tests; live camera not verified |
 | Fist held ~150 ms | Pause | Stops playback. Passing through a fist doesn't count | Verified in replay and bridge tests; live not verified |
 | Fist slid left/right | Slider scrub | Playhead = playhead at the pause + 20 s × offset across the active box (absolute, dead zone). Open the hand to drop it there | Verified in replay, bridge and assistant tests; live not verified |
 | 🤘 held (index + pinky up, middle + ring down, thumb ignored) | Shuttle | Engage; wrist twist = speed, Shift = frame steps, unchanged | Verified in replay tests; live not verified |
 | Esc | Cancel | Clears the sketch; a scrub returns to where the fist / 🤘 started | Verified in replay and bridge tests |
 
+**Camera path (2026-10-11):** the webcam runs natively, not in a browser:
+`node shway/assistant.mjs … --camera` starts `shway/hands.py` (MediaPipe Hand Landmarker via `uv run`) and
+handles the recognizer's events in-process; the editor shows a small camera tile outside the Program monitor.
+Verified: fake-stream tests (frames → recognizer → ink and pause on a fake editor), the tile's
+hostile-input tests, and the worker's no-camera error on the creator's Mac. Not verified: live hand tracking
+through it (camera permission was not granted during the check) and latency (CPU landmarker ≈ 59 ms per
+frame on a blank frame). Keys (Space, Shift, Esc) don't reach the recognizer on this path, and push-to-talk
+voice is unavailable until it moves into the native path.
+
 Guards: swipe and chop need an open hand, so pointing, fists and drawing never fire them. While
 drawing, a fist only pauses and lifts the pen, and 🤘 doesn't engage, so the frame stays under the
-sketch. Double tap no longer toggles playback; play/stop are spoken or keys. The thumb–index pinch
-(the old scrub engage) is now only the draw tap. Ink reaches the editor through the assistant's
-`POST /ink` → `ui.set {ink}`, at most 30 Hz, latest wins.
-
-The thumb–index tap replaced the handoff's thumb–middle tap at the creator's request (2026-10-11).
+sketch. The thumb–index pinch draws; the native camera callback binds meaningful ink to the paused
+frame before sending `ui.set {ink}`, latest wins. The earlier double-tap drawing mode has been
+replaced by held pinch in the current recognizer. An open-palm wave undoes the newest remaining
+stroke, or the last project edit when no ink remains.
 
 ## Freehand drawing + explanation (2026-10-11)
 
@@ -162,6 +170,19 @@ each take one step. Speech-to-text runs through the local proxy's `POST /transcr
   - A live microphone recording.
   - The demo page as a whole.
   - Replacement items that have source In marks.
+
+**Ink overlay status 2026-10-11 (DEV-91):** `ui.set {ink: {pointer, drawing, strokes}}` paints the
+pointer (a dot, or a ring while drawing) and the strokes over the Program monitor picture. Coordinates
+are 0–1 over the frame, not the panel. `ink: null` clears it. Schema and caps:
+[control protocol](../control-protocol.md) `ui.set`.
+
+- **Verified:** hostile payloads and the serde round-trip pass in `crates/ui-egui/tests/ink_ui.rs`.
+- **Verified:** in the live desktop app with a generated 1920×1080 fixture, a Fit view and horizontal
+  letterboxing, `ui.screenshot {panel: "program"}` captured the ring and strokes. Every vertex
+  landed at its 0–1 position on the picture, not on the panel. `ui.inspect` → `ui.ink` reported
+  the state. After `ink: null`, the state was empty and the next screenshot showed no ink.
+- **Not verified:** ink from a live camera through the assistant's `POST /ink`. Also untested:
+  zoomed or panned Program views and the Comparison display.
 
 ## Related pages
 

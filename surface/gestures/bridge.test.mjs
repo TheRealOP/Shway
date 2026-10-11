@@ -1,7 +1,7 @@
 // Bridge tests with a fake adapter. Run: node --test surface/gestures/bridge.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createBridge } from "./bridge.mjs";
+import { createBridge, createInk } from "./bridge.mjs";
 
 function fake({ failOn = "", slow = 0, playhead = 1000 } = {}) {
   const calls = [];
@@ -114,4 +114,50 @@ test("queued slides collapse to the latest; slides after release or without a pa
   const fresh = fake();
   await createBridge(fresh.adapter)({ type: "slide", t: 0, seconds: 1 });
   assert.deepEqual(fresh.calls, []);
+});
+
+test("ink: pinch strokes from pointer events; undo drops the last stroke; 🤘 sets scrub; cancel clears; caps 20 × 500", () => {
+  const ink = createInk();
+  const ev = (type, extra = {}) => ink.event({ type, t: 0, ...extra });
+  ev("pointer", { x: 0.1, y: 0.1 });
+  ev("pen-down"); ev("pointer", { x: 0.2, y: 0.2 });
+  assert.deepEqual(ink.state().strokes, [], "under 3 points is pinch flicker, not ink");
+  ev("pointer", { x: 0.3, y: 0.3 });
+  assert.equal(ink.state().drawing, true, "ring while pinched");
+  ev("pen-up");
+  ev("pointer", { x: 0.5, y: 0.5 }); // pen up: moves the dot only
+  ev("pen-down"); ev("pointer", { x: 0.6, y: 0.6 }); ev("pointer", { x: 0.7, y: 0.7 }); ev("pen-up");
+  assert.deepEqual(ink.state(), { pointer: [0.7, 0.7], strokes: [[[0.1, 0.1], [0.2, 0.2], [0.3, 0.3]], [[0.5, 0.5], [0.6, 0.6], [0.7, 0.7]]], drawing: false, scrub: false });
+  assert.equal(ink.undo(), true);
+  assert.equal(ink.state().strokes.length, 1, "undo drops the last stroke");
+  assert.equal(ink.undo(), true);
+  assert.equal(ink.undo(), false, "nothing left: the wave undoes the last edit instead");
+  assert.equal(ev("engage"), true);
+  assert.equal(ink.state().scrub, true, "🤘 recognised");
+  ev("release");
+  assert.equal(ink.state().scrub, false);
+  assert.equal(ink.visible(false), true);
+  assert.equal(ink.state().pointer, null);
+  assert.equal(ink.visible(false), false, "no change, no send");
+  for (let k = 0; k < 25; k++) { ev("pen-down"); for (let i = 0; i < 600; i++) ev("pointer", { x: k / 100, y: i / 600 }); ev("pen-up"); }
+  const s = ink.state().strokes;
+  assert.equal(s.length, 20);
+  assert.ok(s.every((p) => p.length === 500));
+  assert.equal(s[0][1][0], 0.05);
+  ev("cancel");
+  assert.deepEqual(ink.state(), { pointer: [0.24, 599 / 600], strokes: [], drawing: false, scrub: false });
+});
+
+test("deciding a proposal consumes only submitted native strokes; a later wave can undo the edit", () => {
+  const ink = createInk();
+  for (const x of [0.2, 0.6]) {
+    ink.event({type: "pointer", x, y: 0.4}); ink.event({type: "pen-down"});
+    ink.event({type: "pointer", x: x + 0.01, y: 0.41});
+    ink.event({type: "pointer", x: x + 0.02, y: 0.42}); ink.event({type: "pen-up"});
+  }
+  const [old, newer] = structuredClone(ink.state().strokes);
+  assert.equal(ink.consume([old]), true);
+  assert.deepEqual(ink.state().strokes, [newer]);
+  assert.equal(ink.undo(), true);
+  assert.equal(ink.undo(), false);
 });

@@ -497,6 +497,13 @@ fn empty_space(app: &mut FilmcraftApp, ui: &mut egui::Ui, v: &View, actions: &mu
     let r = Rect::from_min_size(rest.min, vec2(rest.width(), rest.height().max(40.0)));
     let resp = ui.allocate_rect(r, Sense::click());
     app.auto.add(&format!("{}.empty", v.prefix), r.intersect(ui.clip_rect()), "Empty area");
+    // An empty bin says how clips get in, so a new user knows this is where they live.
+    if app.session.project.root.find_bin(v.bin).is_none_or(|b| b.children.is_empty()) {
+        let text = tl!("Your clips live here.\nDouble-click or drop video files to import.").to_string();
+        let color = ui.visuals().weak_text_color();
+        let g = ui.painter().layout(text, egui::FontId::proportional(font(app)), color, (r.width() - 24.0).max(40.0));
+        ui.painter().galley(r.min + vec2(12.0, 12.0), g, color);
+    }
     if resp.clicked() {
         app.ui.project_panel.selected_bin = None;
         actions.push(("project.select".into(), json!({"items": []})));

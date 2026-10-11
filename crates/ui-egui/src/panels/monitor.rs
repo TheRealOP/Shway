@@ -727,10 +727,13 @@ fn source_nav(app: &mut FilmcraftApp, cmd: &str) {
 }
 
 /// The Shway ink (`ui.set {ink}`) over the Program picture: strokes as yellow polylines with a dark
-/// outline (visible on any footage), the pointer as a dot, or a ring while `drawing`.
+/// outline (visible on any footage), the pointer as a dot, or a ring while `drawing`; a pink frame while 🤘 scrubs.
 fn ink_overlay(painter: &egui::Painter, pic: Rect, ink: &crate::state::Ink) {
     const INK: Color32 = Color32::from_rgb(255, 221, 0);
     let outline = Stroke::new(6.0, Color32::from_black_alpha(200));
+    if ink.scrub {
+        painter.rect_stroke(pic, 0.0, Stroke::new(6.0, Color32::from_rgb(255, 64, 160)), egui::StrokeKind::Inside);
+    }
     let at = |[x, y]: [f32; 2]| pos2(pic.min.x + x * pic.width(), pic.min.y + y * pic.height());
     for s in &ink.strokes {
         let pts: Vec<_> = s.iter().copied().map(at).collect();

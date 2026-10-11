@@ -315,9 +315,18 @@ It needs Node 23 or later, because it imports `adapter.ts` and `replace.ts`. It 
 ```sh
 filmcraft --control 9876 project.fcproj                 # the desktop editor
 node shway/gemini-server.mjs --port 8790                # holds the Gemini / Jev keys
-node shway/assistant.mjs --port 8793 --editor 127.0.0.1:9876 --proxy http://127.0.0.1:8790 [--takes takes.json]
+node shway/assistant.mjs --port 8793 --editor 127.0.0.1:9876 --proxy http://127.0.0.1:8790 [--takes takes.json] [--camera]
 node --test shway/assistant.test.mjs                    # fake editor (TCP) + fake proxy
 ```
+
+**Camera (`--camera [index]`, DEV-91).** Spawns `uv run shway/hands.py` ([uv](https://docs.astral.sh/uv/) must be on
+`PATH`; the first run installs MediaPipe and OpenCV into uv's cache and downloads the Apache-2.0 hand model into
+`~/.cache/shway`). The worker reads the default webcam (macOS asks for camera permission for the terminal) and
+prints hand landmarks per frame. The assistant runs them through `surface/gestures/recognizer.mjs` in-process:
+pause, slide, 🤘 shuttle and swipes go through `surface/gestures/bridge.mjs`; pointing and drawing become
+`ui.set {ink}`; a ~10 Hz preview becomes the editor's camera tile (`ui.set {camera}`). Ink and previews are
+latest wins. If the worker fails (no camera, permission denied) it logs one line and chat keeps working;
+restart the assistant to retry. Voice from the old browser page is unavailable until it moves here.
 
 **Contract.** The service listens on loopback only and refuses non-local `Origin` headers. JSON bodies are at most 64 KB.
 
@@ -343,8 +352,8 @@ node --test shway/assistant.test.mjs                    # fake editor (TCP) + fa
    action has its own nested object, and every field in it is required: `answer`, `remove{clips}`,
    `trim{clip, edge, direction, amount, unit}`, `move{clip, target, position}`,
    `replace_take{correction}`, `edit{steps}` (approved commands with explicit clips and `argsJson`),
-   `navigate{operation,value}` and, only while a finished sketch is shown,
-   `transition{from, to, effect, direction}` or `zoom{clip, region, factor}`.
+   `navigate{operation,value}`, `transition{from, to, effect, direction}` and, only while a finished
+   sketch is shown, `zoom{clip, region, factor}`.
 4. Validation rejects any other field, unknown clip ids, amounts that are not positive, trims past
    the clip length or the media handles, and moves onto the same clip, its linked partner or another
    track. An invalid answer gets one
@@ -383,6 +392,12 @@ the catalog also reports all 121 core entries and the 32 excluded IDs. There are
 video/audio effect definitions. Selection-dependent availability describes current editor state;
 explicit targets are validated again during staging. See the
 [coverage and limits](../docs/wiki/interactions.md#ordinary-tools-and-transition-inspection).
+
+**Native ink integration.** The camera worker forwards ink through the assistant’s `updateInk`
+callback, sharing the same bounded frame/revision capture as the optional `/ink` endpoint. Deciding
+a sketch consumes those strokes from native ink too, preserving newer strokes and allowing a later
+wave to undo the accepted edit. `review.html` is only an optional timed-image viewer; camera and
+gestures stay native.
 
 **Rendered transition review.** After staging a transition, `preview.mjs` renders five ordered
 128-pixel candidate frames around the cut and sends those images/timestamps to vision. A rejected,

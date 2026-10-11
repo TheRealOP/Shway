@@ -18,13 +18,12 @@
  *   fine?: boolean,      // fine (frame-step) mode modifier held
  *   cancel?: boolean,    // cancel pressed this frame
  * }} Frame
- * @typedef {{type: "engage" | "release" | "cancel" | "tracking-lost" | "chop" | "pause" | "pen-down" | "pen-up", t: number}
+ * @typedef {{type: "engage" | "release" | "cancel" | "tracking-lost" | "chop" | "undo" | "pause" | "pen-down" | "pen-up", t: number}
  *   | {type: "shuttle", t: number, rate: number}
  *   | {type: "step", t: number, frames: number}
  *   | {type: "swipe", t: number, direction: "left" | "right"}
  *   | {type: "pointer", t: number, x: number, y: number}
- *   | {type: "slide", t: number, seconds: number}
- *   | {type: "draw-toggle", t: number, drawing: boolean}} GestureEvent
+ *   | {type: "slide", t: number, seconds: number}} GestureEvent
  * @typedef {"Idle" | "Armed" | "Adjusting" | "Fist" | "TrackingLost" | "Cancelled"} State
  * @typedef {"open" | "point" | "fist" | "other"} Pose
  */
@@ -49,20 +48,37 @@ export const DEFAULTS = {
   swipeWindowMs: 250,
   swipeMaxOffAxis: 0.5, // max |dy| / |dx|
   swipeCooldownMs: 700,
+  swipeHoldMs: 200, // a swipe waits this long: if the hand reverses (a wave) it is dropped
   quietAfterReleaseMs: 400, // no swipes right after an engagement ends
   mirrored: false, // true when landmarks come from a mirrored (selfie) image
   aspect: 4 / 3, // image width / height, so on-screen distances aren't stretched
   tapOn: 0.35, // thumb–index tip distance / palm length (nearer of 3D and on-screen): closed below, open above tapOff
   tapOff: 0.5,
   tapMiddleRatio: 1.2, // thumb at least this many times nearer the index tip than the middle tip
-  tapMaxMs: 350, // a tap closes and opens within this
-  doubleTapGapMs: 400, // second tap must start within this of the first ending
   chopMinPalms: 0.7, // downward fingertip travel, in on-screen palm lengths, within swipeWindowMs
   chopMaxOffAxis: 2.5, // max |dx| / dy: a flick swings the tips in an arc, so allow diagonal
   chopBladeMax: 0.6, // knuckle line's share facing the camera: below = hand edge-on (a blade)
   fingerStraight: 1.5, // fingertip reaches this × its knuckle's distance from the wrist
   chopCooldownMs: 1000,
+  waveMinLeg: 0.06, // open-palm wave = undo: each side-to-side leg moves the palm this share of the image width
+  waveLegs: 3, // legs (left-right-left) within waveWindowMs
+  waveWindowMs: 900, // short, so a swipe and a swipe back a second later are not a wave
 };
+
+/** Side-to-side legs of at least `leg` in a run of palm x samples (direction reversals + 1). */
+function waveLegs(/** @type {{x: number}[]} */ s, /** @type {number} */ leg) {
+  let legs = 0, dir = 0, lo = Infinity, hi = -Infinity, ext = 0;
+  for (const { x } of s) {
+    if (dir === 0) { // first leg: from the lowest or highest point so far
+      lo = Math.min(lo, x);
+      hi = Math.max(hi, x);
+      dir = x - lo >= leg ? 1 : hi - x >= leg ? -1 : 0;
+      if (dir) { legs = 1; ext = x; }
+    } else if ((x - ext) * dir > 0) ext = x; // still going the same way
+    else if (Math.abs(x - ext) >= leg) { dir = -dir; legs++; ext = x; } // reversed far enough
+  }
+  return legs;
+}
 
 const WRIST = 0, THUMB_TIP = 4, INDEX_MCP = 5, INDEX_TIP = 8, MIDDLE_MCP = 9, MIDDLE_TIP = 12, PINKY_MCP = 17;
 const FINGERS = [[5, 8], [9, 12], [13, 16], [17, 20]]; // [knuckle, tip]
@@ -152,18 +168,17 @@ export function createRecognizer(config = {}) {
   let detent = 0;
   let cooldownUntil = -Infinity;
   /** @type {{t: number, x: number, y: number, tipX: number, tipY: number, palm: number, blade: boolean}[]} */ let track = [];
+  /** @type {{t: number, x: number}[]} */ let wave = []; // open-palm x, for the undo wave
+  let waveUntil = -Infinity; // swipes stand down until then: a wave reversed or undid recently
+  /** @type {{t: number, direction: "left" | "right"} | null} */ let pendingSwipe = null;
   let tapping = false; // thumb–index closed
-  let tapStart = -Infinity;
-  let lastTap = -Infinity; // end of a single tap awaiting its pair
   let blade = false; // hand currently chop-ready, for feedback
   let tapRatio = Infinity; // thumb–index closeness, for feedback
   let chopTravel = 0; // fingertip drop so far in the window, palm lengths, for feedback
   let confidence = 0;
   let hornsFingers = 0; // how many of the four 🤘 finger conditions hold, for feedback
   /** @type {Pose | null} */ let pose = null;
-  let drawing = false;
   let penDown = false;
-  let penBlockedUntil = -Infinity; // a single tap lifts the pen until a second tap could still follow
   /** @type {{x: number, y: number} | null} */ let pointer = null; // smoothed, while pointing
   /** @type {{x: number, y: number} | null} */ let sentPointer = null;
   let fistSince = -Infinity; // fist pose start, or -Infinity
@@ -196,7 +211,6 @@ export function createRecognizer(config = {}) {
     const t = f.t;
     lastT = t;
     const h = usableHand(f.hand, c.minScore);
-    let tapEnded = false;
     blade = false;
     chopTravel = 0;
     confidence = Number.isFinite(f.hand?.score) ? Number(f.hand?.score) : 0;
@@ -219,8 +233,6 @@ export function createRecognizer(config = {}) {
       const wasTapping = tapping;
       // Thumb–index tap. Not from a fist: curled fingertips bunch up around the thumb.
       tapping = tapping ? close < c.tapOff : close < c.tapOn && middleClose > close * c.tapMiddleRatio && pose !== "fist";
-      if (tapping && !wasTapping) tapStart = t;
-      if (!tapping && wasTapping) tapEnded = true;
     } else {
       horns = false;
       tapping = false;
@@ -228,8 +240,8 @@ export function createRecognizer(config = {}) {
       hornsFingers = 0;
       pose = null;
     }
-    // While drawing, nothing may move the frame under the sketch.
-    const engage = (Boolean(f.key) || horns) && !drawing;
+    // While drawing (pinched), nothing may move the frame under the sketch.
+    const engage = (Boolean(f.key) || horns) && !tapping;
 
     if (state === "Armed" || state === "Adjusting") {
       if (!h || h.handedness !== handedness) {
@@ -269,7 +281,6 @@ export function createRecognizer(config = {}) {
         state = mag > 0 ? "Adjusting" : "Armed";
       }
       track = [];
-      lastTap = -Infinity;
       return out;
     }
 
@@ -284,7 +295,7 @@ export function createRecognizer(config = {}) {
         state = "Idle";
         cooldownUntil = Math.max(cooldownUntil, t + c.quietAfterReleaseMs);
         out.push({ type: "release", t });
-      } else if (!drawing) {
+      } else {
         // Absolute offset from where the fist closed: no drift, and back to the start is back to 0.
         palmX += c.pointerSmoothing * ((h.image[WRIST].x + h.image[MIDDLE_MCP].x) / 2 - palmX);
         const d = ((c.mirrored ? 1 : -1) * (palmX - fistX0)) / Math.max(1e-9, c.pointerBox);
@@ -295,7 +306,6 @@ export function createRecognizer(config = {}) {
         slide = s;
       }
       track = [];
-      lastTap = -Infinity;
       return out;
     }
 
@@ -306,6 +316,10 @@ export function createRecognizer(config = {}) {
     }
 
     // Idle
+    if (pendingSwipe && t - pendingSwipe.t >= c.swipeHoldMs) { // no reversal came: it was a swipe
+      out.push({ type: "swipe", t, direction: pendingSwipe.direction });
+      pendingSwipe = null;
+    }
     const lift = () => { if (penDown) out.push({ type: "pen-up", t }); penDown = false; };
     if (h && engage) {
       const axis = axisOf(h.world);
@@ -324,48 +338,30 @@ export function createRecognizer(config = {}) {
     }
     if (!h || engage) {
       if (engage) track = []; // a dropped frame mid-flick (motion blur) keeps the window
-      lastTap = -Infinity;
+      wave = [];
       lift();
       pointer = sentPointer = null;
       fistSince = -Infinity;
       return out;
     }
-    if (tapEnded) {
-      if (t - tapStart > c.tapMaxMs) lastTap = -Infinity; // a hold, not a tap
-      else if (tapStart - lastTap <= c.doubleTapGapMs) {
-        drawing = !drawing;
-        if (!drawing) lift();
-        out.push({ type: "draw-toggle", t, drawing });
-        lastTap = -Infinity;
-        penBlockedUntil = t;
-      } else {
-        lastTap = t;
-        penBlockedUntil = t + c.doubleTapGapMs; // maybe the first tap of "drawing off": don't start a stroke
-      }
-    }
-    if (f.cancel && drawing) { // Esc drops the sketch
-      drawing = false;
-      lift();
-      out.push({ type: "cancel", t });
-    }
     const w = h.image;
-    // Pointer and pen. While the thumb is on the index tip (a tap, or a held pinch) the pointer freezes
-    // and the pen lifts, so the tap doesn't smear the end of the stroke.
-    if (tapping) { /* frozen */ } else if (pose === "point") {
-      const p = toBox(w[INDEX_TIP].x, w[INDEX_TIP].y, c);
+    // Pinch = pen: while the thumb holds the index tip the pen is down at the pinch point. Pointing
+    // moves the dot with the pen up.
+    if (tapping || pose === "point") {
+      const tip = tapping ? { x: (w[THUMB_TIP].x + w[INDEX_TIP].x) / 2, y: (w[THUMB_TIP].y + w[INDEX_TIP].y) / 2 } : w[INDEX_TIP];
+      const p = toBox(tip.x, tip.y, c);
       const k = c.pointerSmoothing;
       pointer = pointer ? { x: pointer.x + k * (p.x - pointer.x), y: pointer.y + k * (p.y - pointer.y) } : p;
     } else pointer = null;
-    const pen = drawing && pose === "point" && !tapping && t >= penBlockedUntil;
-    if (pen && !penDown) out.push({ type: "pen-down", t });
-    if (!pen) lift();
-    penDown = pen;
     if (pointer && (!sentPointer || Math.max(Math.abs(pointer.x - sentPointer.x), Math.abs(pointer.y - sentPointer.y)) >= c.pointerMinMove)) {
       sentPointer = pointer;
       out.push({ type: "pointer", t, x: round(pointer.x), y: round(pointer.y) });
     }
+    if (tapping && !penDown) out.push({ type: "pen-down", t });
+    if (!tapping) lift();
+    penDown = tapping;
     if (!pointer) sentPointer = null;
-    // Fist: pause once held. While drawing it only pauses (the pen is already up).
+    // Fist: pause once held.
     if (pose === "fist") {
       if (fistSince === -Infinity) {
         fistSince = t;
@@ -381,13 +377,31 @@ export function createRecognizer(config = {}) {
         return out;
       }
     } else fistSince = -Infinity;
-    // Swipe and chop need an open hand: pointing, fists, drawing and other poses never fire them.
-    if (pose !== "open" || drawing) {
+    const x = (w[WRIST].x + w[INDEX_MCP].x + w[PINKY_MCP].x) / 3;
+    const y = (w[WRIST].y + w[INDEX_MCP].y + w[PINKY_MCP].y) / 3;
+    // Open-palm wave = undo (the last stroke, else the last edit).
+    if (pose === "open") {
+      wave.push({ t, x });
+      wave = wave.filter((s) => s.t >= t - c.waveWindowMs);
+      const legs = waveLegs(wave, c.waveMinLeg);
+      if (legs >= 2) { // the hand reversed: a wave, not a swipe
+        pendingSwipe = null;
+        waveUntil = t + c.waveWindowMs;
+      }
+      if (t >= cooldownUntil && legs >= c.waveLegs) {
+        out.push({ type: "undo", t });
+        cooldownUntil = t + c.swipeCooldownMs;
+        waveUntil = t + c.waveWindowMs; // still waving after the undo: no swipes
+        wave = [];
+        track = [];
+        return out;
+      }
+    } else wave = [];
+    // Swipe and chop need an open hand: pointing, fists, pinches and other poses never fire them.
+    if (pose !== "open") {
       track = [];
       return out;
     }
-    const x = (w[WRIST].x + w[INDEX_MCP].x + w[PINKY_MCP].x) / 3;
-    const y = (w[WRIST].y + w[INDEX_MCP].y + w[PINKY_MCP].y) / 3;
     // Fingertips, not the palm: a wrist flick swings the fingers while the palm barely moves.
     const tipX = (w[INDEX_TIP].x + w[MIDDLE_TIP].x) / 2 * c.aspect;
     const tipY = (w[INDEX_TIP].y + w[MIDDLE_TIP].y) / 2;
@@ -405,12 +419,12 @@ export function createRecognizer(config = {}) {
         return out;
       }
     }
-    if (t >= cooldownUntil && first) {
+    if (t >= cooldownUntil && t >= waveUntil && first) {
       const dx = x - first.x, dy = y - first.y;
       if (Math.abs(dx) >= c.swipeMinDist && Math.abs(dy) <= c.swipeMaxOffAxis * Math.abs(dx)) {
         // Camera faces the user: in an unmirrored image the user's right is image left.
         const right = c.mirrored ? dx > 0 : dx < 0;
-        out.push({ type: "swipe", t, direction: right ? "right" : "left" });
+        pendingSwipe = { t, direction: right ? "right" : "left" };
         cooldownUntil = t + c.swipeCooldownMs;
         track = [];
       }
@@ -420,7 +434,7 @@ export function createRecognizer(config = {}) {
 
   /** UI snapshot: mode, effect and confidence must stay visible. */
   const view = () => ({ state, rate, fine, angleDeg: angle, handedness, confidence, horns, hornsFingers, tapping, blade, tapRatio, chopTravel,
-    pose, drawing, penDown, pointer: pointer && { x: round(pointer.x), y: round(pointer.y) } });
+    pose, drawing: penDown, penDown, pointer: pointer && { x: round(pointer.x), y: round(pointer.y) } });
 
   return { step, view };
 }

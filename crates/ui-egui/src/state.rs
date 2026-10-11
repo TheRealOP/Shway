@@ -538,6 +538,9 @@ pub struct Ink {
     pub pointer: Option<[f32; 2]>,
     pub strokes: Vec<Vec<[f32; 2]>>,
     pub drawing: bool,
+    /// 🤘 recognised (shuttle engaged): the Program picture gets a coloured frame.
+    #[serde(default)]
+    pub scrub: bool,
 }
 
 impl Ink {
@@ -557,6 +560,9 @@ impl Ink {
         }
         if let Some(v) = p.get("drawing") {
             self.drawing = v.as_bool().unwrap_or(false);
+        }
+        if let Some(v) = p.get("scrub") {
+            self.scrub = v.as_bool().unwrap_or(false);
         }
         if let Some(v) = p.get("strokes") {
             let strokes = v.as_array().map(Vec::as_slice).unwrap_or_default();

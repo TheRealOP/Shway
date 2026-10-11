@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { createServer as tcp } from "node:net";
 import { createServer as http } from "node:http";
 import { existsSync, writeFileSync } from "node:fs";
-import { createAssistant, fit, readInk, validateAction, SKETCH_MODEL } from "./assistant.mjs";
+import { controlTransport, createAssistant, createCamera, fit, readInk, validateAction, SKETCH_MODEL } from "./assistant.mjs";
 import { MAX_IMAGE_BYTES } from "./gemini-server.mjs";
 
 const TPS = 254016000000, F = TPS / 30;
@@ -15,7 +15,7 @@ const REQUIRED = ["project.inspect", "sequence.inspect", "timeline.select", "pla
 const clip = (clip, item, link, start, dur, sourceIn, name) => ({ clip, item, link, name, start: start * F, duration: dur * F, sourceIn: sourceIn * F, sourceOut: (sourceIn + dur) * F });
 
 function fakeEditor() {
-  const st = { revision: 5, proposal: null, next: 1, history: [], previews: [], renders: [], onPreview: null, playhead: 400 * F, playing: true, ui: [], ink: [], inkGate: null, shots: [], shotSize: 64, monitorFrame: null, monitorRevision: null };
+  const st = { revision: 5, proposal: null, next: 1, history: [], previews: [], renders: [], onPreview: null, playhead: 400 * F, playing: true, ui: [], ink: [], camera: [], inkGate: null, shots: [], shotSize: 64, monitorFrame: null, monitorRevision: null };
   const seq = () => ({
     id: 27, name: "Cut", duration: 450 * F, settings: { frame_rate: { num: 30, den: 1 } }, playhead: 0, selection: [],
     video: [{ id: 1, locked: false, items: [clip(10, 1, 1, 0, 300, 30, "C5500.MP4"), clip(12, 2, 2, 300, 150, 0, "C5517.MP4")] }],
@@ -66,9 +66,10 @@ function fakeEditor() {
       let i;
       while ((i = buf.indexOf("\n")) >= 0) {
         const req = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1);
-        if (req.method === "ui.set") { // waits on st.inkGate, so a test can hold one in flight
-          st.ink.push(req.params.ink);
-          Promise.resolve(st.inkGate).then(() => sock.write(JSON.stringify({ id: req.id, ok: true, result: {} }) + "\n"));
+        if (req.method === "ui.set") {
+          if ("ink" in req.params) st.ink.push(req.params.ink);
+          if ("camera" in req.params) st.camera.push(req.params.camera);
+          sock.write(JSON.stringify({ id: req.id, ok: true, result: {} }) + "\n");
           continue;
         }
         let reply;
@@ -116,14 +117,16 @@ const listen = (s) => new Promise((r) => s.listen(0, "127.0.0.1", () => r(s.addr
 async function setup(opts = {}) {
   const editor = fakeEditor(), proxy = fakeProxy();
   const ep = await listen(editor.server), pp = await listen(proxy.server);
-  const app = createAssistant({ editor: `127.0.0.1:${ep}`, proxy: `http://127.0.0.1:${pp}`, ...opts });
+  // The camera's sketch (createInk in the real thing): draw() is what the camera would have built.
+  const sketch = { cur: null, state: () => sketch.cur, clear: () => { sketch.cur = null; }, consume: () => { sketch.cur = null; } };
+  const app = createAssistant({ editor: `127.0.0.1:${ep}`, proxy: `http://127.0.0.1:${pp}`, sketch, ...opts });
   const port = await listen(app);
   const call = async (path, body, headers = {}) => {
     const r = await fetch(`http://127.0.0.1:${port}${path}`, body === undefined ? { headers } : { method: "POST", headers: { "content-type": "application/json", ...headers }, body: typeof body === "string" ? body : JSON.stringify(body) });
     return { status: r.status, body: await r.json() };
   };
   const close = () => { for (const s of [editor.server, proxy.server, app]) { s.closeAllConnections?.(); s.close(); } };
-  return { editor: editor.st, proxy, call, close, port };
+  return { updateInk: app.updateInk, editor: editor.st, proxy, call, close, port, editorPort: ep, sketch, draw: async (ink) => { sketch.cur = ink; await app.updateInk(ink); } };
 }
 
 test("answer: state keeps the conversation; the model sees project data incl. transcript text", async (t) => {
@@ -337,7 +340,7 @@ test("review: stop captures the moment; a note binds to it, previews, accept com
 test("review: a scrub while talking marks a range; reject returns to the moment and plays", async (t) => {
   const s = await setup(); t.after(s.close);
   const { moment } = (await s.call("/review/stop", {})).body;
-  assert.equal((await s.call("/review/transport", { event: { type: "step", frames: 30 } })).status, 200);
+  s.editor.playhead += 30 * F; // a 30-frame step gesture
   s.proxy.answers.push({ action: "trim", reply: "ok", clip: 12, edge: "in", direction: "shorten", amount: 1, unit: "seconds" });
   await s.call("/review/note", { moment, transcript: "from here to here is dead air", gestures: [{ type: "step" }] });
   assert.match(s.proxy.prompts[0].prompt, /marking 13\.33–14\.33 s: from here to here is dead air/);
@@ -359,15 +362,10 @@ test("review: stale moment is a clear 409 shown in chat; cancel resumes", async 
   assert.equal(s.editor.playing, true);
 });
 
-test("review transport and HTTP boundary: bridge drives playback; chop, hostile input refused; CORS preflight", async (t) => {
+test("review HTTP boundary: hostile input refused; optional remote routes stay validated; CORS preflight", async (t) => {
   const s = await setup(); t.after(s.close);
-  assert.equal((await s.call("/review/transport", { event: { type: "shuttle", rate: -2 } })).status, 200);
-  assert.deepEqual(s.editor.ui.at(-1), ["play", -2]);
-  await s.call("/review/transport", { event: { type: "shuttle", rate: 0 } });
-  assert.equal(s.editor.playing, false);
-  assert.equal((await s.call("/review/transport", { event: { type: "chop" } })).body.error, "chop is a cut: POST /review/cut");
-  for (const event of [null, { type: "rm" }, { type: "shuttle", rate: 1e9 }, { type: "step", frames: 0.5 }, { type: "swipe", direction: "up" }])
-    assert.equal((await s.call("/review/transport", { event })).status, 400, JSON.stringify(event));
+  assert.equal((await s.call("/review/transport", {})).status, 400);
+  assert.equal((await s.call("/ink", {})).status, 200);
   assert.equal((await s.call("/review/stop", { x: 1 })).status, 400);
   const m = { revision: 5, playhead: 0, clip: null };
   for (const b of [{ transcript: "x" }, { moment: { ...m, extra: 1 }, transcript: "x" }, { moment: { ...m, playhead: -1 }, transcript: "x" },
@@ -380,61 +378,43 @@ test("review transport and HTTP boundary: bridge drives playback; chop, hostile 
   assert.equal((await fetch(`http://127.0.0.1:${s.port}/review/note`, { method: "OPTIONS", headers: { origin: "https://evil.example" } })).status, 403);
 });
 
-// ---- Part 2 gestures (DEV-91): fist pause / slide transport, and the camera page's ink.
-test("review transport: a fist pauses, a slide seeks from the paused playhead (no undo entry); double tap is gone", async (t) => {
-  const s = await setup(); t.after(s.close);
-  assert.equal((await s.call("/review/transport", { event: { type: "pause" } })).status, 200);
-  assert.equal(s.editor.playing, false);
-  assert.equal((await s.call("/review/transport", { event: { type: "slide", seconds: 2 } })).status, 200);
-  assert.deepEqual(s.editor.ui.at(-1), ["seek", 400 * F + 2 * TPS]);
-  await s.call("/review/transport", { event: { type: "slide", seconds: -500 } });
-  assert.deepEqual(s.editor.ui.at(-1), ["seek", 0], "clamped at 0");
-  await s.call("/review/transport", { event: { type: "cancel" } });
-  assert.deepEqual(s.editor.ui.at(-1), ["seek", 400 * F], "Esc returns to where the fist closed");
-  assert.deepEqual([s.editor.history, s.editor.revision], [[], 5]);
-  for (const event of [{ type: "slide" }, { type: "slide", seconds: 1e6 }, { type: "slide", seconds: "1" }, { type: "double-tap" }, { type: "pointer", x: 0, y: 0 }])
-    assert.equal((await s.call("/review/transport", { event })).status, 400, JSON.stringify(event));
-});
+// ---- Camera (DEV-91): a fake hands.py stream → recognizer → bridge and ui.set on the fake editor.
+// Canonical right hand (metres, wrist at origin, fingers up), as in surface/gestures/recognizer.test.mjs.
+const BASE = [[0, 0], [-0.03, 0.02], [-0.045, 0.04], [-0.055, 0.06], [-0.06, 0.08], [-0.025, 0.09], [-0.027, 0.13], [-0.028, 0.155],
+  [-0.029, 0.175], [0, 0.095], [0, 0.14], [0, 0.165], [0, 0.185], [0.02, 0.09], [0.022, 0.13], [0.023, 0.152], [0.024, 0.17],
+  [0.038, 0.08], [0.04, 0.11], [0.041, 0.128], [0.042, 0.145]];
+const POSES = { fist: { curl: [8, 12, 16, 20], thumb: [-0.025, 0.075] }, point: { curl: [12, 16, 20], thumb: [-0.07, 0.06] } };
+const hand = (pose, x = 0.5) => {
+  const P = POSES[pose];
+  const world = BASE.map(([px, py], i) => (P.curl.includes(i) ? [px * 0.5 - 0.02, 0.07] : i === 4 ? P.thumb : [px, py])).map(([wx, wy]) => ({ x: wx, y: wy, z: 0 }));
+  return { world, image: world.map((p) => ({ x: x + p.x * 1.5, y: 0.5 - p.y * 1.5, z: 0 })), handedness: "Right", score: 0.95 };
+};
+const until = async (ok) => { for (let i = 0; i < 200 && !ok(); i++) await new Promise((r) => setTimeout(r, 5)); assert.ok(ok()); };
 
-test("/ink: forwards ui.set {ink}; skips the busy lock; coalesces to the latest while one is in flight", async (t) => {
+test("camera: worker frames drive the editor in-process: point → ink, fist → pause, preview → tile, loss and junk are safe", async (t) => {
   const s = await setup(); t.after(s.close);
-  const ink = { pointer: [0.5, 0.25], strokes: [[[0.1, 0.2], [0.3, 0.4]]], drawing: true };
-  assert.deepEqual(await s.call("/ink", ink), { status: 200, body: { ok: true } });
-  assert.deepEqual(s.editor.ink, [ink]);
-  // Busy with a chat: ink still goes through.
-  const open = s.proxy.hold();
-  s.proxy.answers.push({ action: "answer", reply: "ok" });
-  const chat = s.call("/chat", { message: "hi" });
-  while (!s.proxy.prompts.length) await new Promise((r) => setTimeout(r, 5));
-  assert.equal((await s.call("/chat", { message: "again" })).status, 409);
-  assert.equal((await s.call("/ink", { pointer: null, strokes: [], drawing: false })).status, 200);
-  open(); await chat;
-  // One ui.set in flight: of the bodies that arrive meanwhile only the newest is sent next.
-  let release;
-  s.editor.inkGate = new Promise((r) => (release = r));
-  s.editor.ink.length = 0;
-  const body = (x) => ({ pointer: [x, x], strokes: [], drawing: false });
-  const sent = [s.call("/ink", body(0.1))];
-  while (s.editor.ink.length < 1) await new Promise((r) => setTimeout(r, 5));
-  for (const x of [0.2, 0.3]) { sent.push(s.call("/ink", body(x))); await new Promise((r) => setTimeout(r, 30)); }
-  release();
-  assert.ok((await Promise.all(sent)).every((r) => r.status === 200));
-  assert.deepEqual(s.editor.ink.map((i) => i.pointer[0]), [0.1, 0.3]);
-});
-
-test("/ink is hostile-input safe: caps 20 strokes × 500 points, drops bad points, refuses bad shapes", async (t) => {
-  const s = await setup(); t.after(s.close);
-  const stroke = (k) => [[NaN, 0], [2, 0.5], ...Array.from({ length: 600 }, (_, i) => [k / 100, i / 600])];
-  const r = await s.call("/ink", { pointer: null, strokes: [[], ...Array.from({ length: 25 }, (_, k) => stroke(k))], drawing: true });
-  assert.equal(r.status, 200);
-  const got = s.editor.ink.at(-1);
-  assert.equal(got.strokes.length, 20);
-  assert.ok(got.strokes.every((p) => p.length === 500));
-  assert.deepEqual(got.strokes[0][0], [0.05, 0], "the newest 20 strokes are kept");
-  for (const b of [{ pointer: [2, 0] }, { pointer: [0.5] }, { pointer: "x" }, { strokes: "x" }, { strokes: [7] }, { drawing: "yes" }, { extra: 1 }])
-    assert.equal((await s.call("/ink", b)).status, 400, JSON.stringify(b));
-  assert.equal((await s.call("/ink", JSON.stringify({ strokes: [[["x".repeat(600 * 1024)]]] }))).status, 413);
-  assert.deepEqual(readInk({}), { pointer: null, strokes: [], drawing: false });
+  const logs = [];
+  const feed = createCamera(controlTransport(`127.0.0.1:${s.editorPort}`), { log: (m) => logs.push(m) });
+  let ms = 0;
+  const frames = (n, h) => { for (let i = 0; i < n; i++) feed(JSON.stringify({ t: (ms += 33), hand: h })); };
+  frames(10, hand("point", 0.45));
+  frames(10, hand("point", 0.6));
+  await until(() => s.editor.ink.some((i) => i.pointer));
+  const dot = s.editor.ink.at(-1).pointer;
+  assert.ok(dot[0] > 0 && dot[0] < 1 && dot[1] > 0 && dot[1] < 1, JSON.stringify(dot));
+  frames(15, hand("fist"));
+  await until(() => s.editor.playing === false);
+  assert.deepEqual(s.editor.ui.at(-1), ["stop", undefined]);
+  assert.equal(s.editor.ink.at(-1).pointer, null, "the dot hides when the hand stops pointing");
+  feed(JSON.stringify({ preview: "AAAA" }));
+  feed(JSON.stringify({ preview: "x".repeat(300 * 1024) })); // over the cap: dropped
+  await until(() => s.editor.camera.length === 1);
+  for (const junk of ["", "{", "[1]", "null", JSON.stringify({ t: "x", hand: 1 }), JSON.stringify({ t: ms + 1, hand: { image: 7 } })]) feed(junk);
+  feed(JSON.stringify({ error: "camera 0 unavailable" }));
+  feed(null); // worker died
+  assert.deepEqual(logs, ["camera: camera 0 unavailable"]);
+  assert.deepEqual([s.editor.history, s.editor.revision], [[], 5], "no edits from the camera");
+  assert.equal((await s.call("/chat/state")).status, 200, "chat still works");
 });
 
 // ---- Freehand + explanation → one grounded multimodal edit.
@@ -460,21 +440,11 @@ test("sketch: split figure + 'use this video afterwards' → move then split in 
     { command: "timeline.move", params: { clip: 10, anchor: 12, position: "after" } },
     { command: "sequence.applyVideoTransition", params: { clip: 12, effect: "split", edge: "out" } },
   ]);
-  assert.equal(s.editor.ink.length, 1);
   const a = await s.call("/chat/accept", {});
   assert.match(a.body.reply, /^Applied "Move C5500\.MP4 after C5517\.MP4, split between"\. It's one undo step\.$/);
   assert.equal(s.editor.history.length, 1);
   assert.deepEqual(s.editor.ink.at(-1), null);
-  // The camera keeps re-sending its stroke list: the decided strokes stay off; a new stroke shows.
-  await s.call("/ink", { ...SKETCH, pointer: [0.2, 0.2] });
-  assert.deepEqual(s.editor.ink.at(-1), { pointer: [0.2, 0.2], strokes: [], drawing: false });
-  const fresh = [[0.1, 0.1], [0.2, 0.2]];
-  await s.call("/ink", { ...SKETCH, strokes: [...SKETCH.strokes, fresh], drawing: true });
-  assert.deepEqual(s.editor.ink.at(-1).strokes, [fresh]);
-  await s.call("/ink", { pointer: null, strokes: [], drawing: false }); // the camera cleared: strokes count again
-  await s.call("/ink", SKETCH);
-  assert.deepEqual(s.editor.ink.at(-1), SKETCH);
-  await s.call("/ink", { pointer: null, strokes: [], drawing: false });
+  assert.equal(s.sketch.cur, null, "the camera's sketch is cleared too");
   // The sketch is used up: the next message is a plain chat (no screenshot, no vision call).
   s.proxy.answers.push({ action: "answer", reply: "Done." });
   await s.call("/chat", { message: "thanks" });
@@ -513,21 +483,25 @@ test("sketch: ambiguous freehand intent asks for clarification and preserves ink
   assert.deepEqual(s.editor.ink, [SKETCH]);
 });
 
-test("sketch: only a finished sketch is read; without one a transition action is invalid", async (t) => {
+test("typed transition: no sketch needed; the creator names the effect; an unknown effect is retried", async (t) => {
   const s = await setup(); t.after(s.close);
-  await s.call("/ink", { ...SKETCH, drawing: true }); // still drawing
-  s.proxy.answers.push({ action: "transition", reply: "x", from: 10, to: 12 }, { action: "answer", reply: "Draw it first." });
-  const r = await s.call("/chat", { message: "split here" });
-  assert.equal(r.body.reply, "Draw it first.");
-  assert.equal(s.editor.shots.length, 0);
-  assert.match(s.proxy.prompts[1].prompt, /transition needs a finished sketch/);
-  assert.doesNotMatch(s.proxy.prompts[0].system, /transition:/);
+  await s.draw({ ...SKETCH, drawing: true }); // still pinching: not a finished sketch, so it isn't read
+  s.proxy.answers.push({ action: "transition", reply: "x", from: 10, to: 12, effect: "wipe", direction: "none" },
+    { action: "transition", reply: "Iris into the next shot.", from: 10, to: 12, effect: "iris_round", direction: "none" });
+  const r = await s.call("/chat", { message: "add an iris transition into the next clip" });
+  assert.match(r.body.reply, /^Iris into the next shot\. Preview ready/);
+  assert.equal(s.editor.shots.length, 0, "no sketch, no screenshot");
+  assert.match(s.proxy.prompts[0].system, /transition\.effect "split", "push"/);
+  assert.match(s.proxy.prompts[1].prompt, /transition needs an allowed effect/);
+  assert.deepEqual(s.editor.previews[0].steps, [{ command: "sequence.applyVideoTransition", params: { clip: 10, effect: "iris_round", edge: "out" } }]);
+  await s.call("/chat/accept", {});
+  assert.deepEqual(s.sketch.cur, { ...SKETCH, drawing: true }, "a typed transition leaves the ink alone");
 });
 
 test("sketch: oversized Program picture is refused before the vision call", async (t) => {
   const s = await setup(); t.after(s.close);
   s.editor.shotSize = MAX_IMAGE_BYTES + 1;
-  await s.call("/ink", SKETCH);
+  await s.draw(SKETCH);
   const r = await s.call("/chat", { message: "use this video afterwards" });
   assert.equal(r.status, 200);
   assert.match(r.body.reply, /too large.*Nothing changed\.$/);
@@ -704,4 +678,21 @@ test("failed visual transition review cancels staging and offers no acceptance",
   const r=await s.call("/chat",{message:"split to the next shot"});
   assert.match(r.body.reply,/rendered transition needs clarification/);
   assert.equal(r.body.pending,null);assert.equal(s.editor.proposal,null);assert.equal(s.editor.history.length,0);
+});
+
+test("native camera ink callback binds the paused frame and reaches multimodal interpretation", async (t) => {
+  const s = await setup(); t.after(s.close);
+  const incoming = [];
+  const feed = createCamera(controlTransport(`127.0.0.1:${s.editorPort}`), {onInk: async ink => {incoming.push(ink); await s.updateInk(ink);}});
+  for (let n = 1; n < 12; n++) feed(JSON.stringify({t:n*33, hand:hand("point",0.45)}));
+  await until(() => s.editor.ink.some(i => i.pointer));
+  assert.ok(incoming.length);
+  await s.updateInk({...CIRCLE_ARROWS, scrub:false});
+  assert.equal(s.editor.playing, false);
+  s.proxy.answers.push(ZOOM);
+  const r = await s.call("/chat", {message:"Zoom 2x into this area"});
+  assert.equal(r.status, 200);
+  assert.match(r.body.reply, /Preview ready/);
+  assert.equal(s.proxy.prompts[0].images.length, 1);
+  await s.call("/chat/reject", {});
 });
