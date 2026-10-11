@@ -309,9 +309,18 @@ It needs Node 23 or later, because it imports `adapter.ts` and `replace.ts`. It 
 ```sh
 filmcraft --control 9876 project.fcproj                 # the desktop editor
 node shway/gemini-server.mjs --port 8790                # holds the Gemini / Jev keys
-node shway/assistant.mjs --port 8793 --editor 127.0.0.1:9876 --proxy http://127.0.0.1:8790 [--takes takes.json]
+node shway/assistant.mjs --port 8793 --editor 127.0.0.1:9876 --proxy http://127.0.0.1:8790 [--takes takes.json] [--camera]
 node --test shway/assistant.test.mjs                    # fake editor (TCP) + fake proxy
 ```
+
+**Camera (`--camera [index]`, DEV-91).** Spawns `uv run shway/hands.py` ([uv](https://docs.astral.sh/uv/) must be on
+`PATH`; the first run installs MediaPipe and OpenCV into uv's cache and downloads the Apache-2.0 hand model into
+`~/.cache/shway`). The worker reads the default webcam (macOS asks for camera permission for the terminal) and
+prints hand landmarks per frame. The assistant runs them through `surface/gestures/recognizer.mjs` in-process:
+pause, slide, 🤘 shuttle and swipes go through `surface/gestures/bridge.mjs`; pointing and drawing become
+`ui.set {ink}`; a ~10 Hz preview becomes the editor's camera tile (`ui.set {camera}`). Ink and previews are
+latest wins. If the worker fails (no camera, permission denied) it logs one line and chat keeps working;
+restart the assistant to retry. Voice from the old browser page is unavailable until it moves here.
 
 **Contract.** The service listens on loopback only and refuses non-local `Origin` headers. JSON bodies are at most 64 KB.
 

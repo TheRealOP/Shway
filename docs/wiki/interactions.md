@@ -35,11 +35,20 @@ One gesture, one meaning. Thresholds live in `DEFAULTS` in
 | 🤘 held | Shuttle | Engage; wrist twist = speed, Shift = frame steps, unchanged | Verified in replay tests; live not verified |
 | Esc | Cancel | Clears the sketch; a scrub returns to where the fist / 🤘 started | Verified in replay and bridge tests |
 
+**Camera path (2026-10-11):** the webcam runs natively, not in a browser:
+`node shway/assistant.mjs … --camera` starts `shway/hands.py` (MediaPipe Hand Landmarker via `uv run`) and
+handles the recognizer's events in-process; the editor shows a small camera tile outside the Program monitor.
+Verified: fake-stream tests (frames → recognizer → ink and pause on a fake editor), the tile's
+hostile-input tests, and the worker's no-camera error on the creator's Mac. Not verified: live hand tracking
+through it (camera permission was not granted during the check) and latency (CPU landmarker ≈ 59 ms per
+frame on a blank frame). Keys (Space, Shift, Esc) don't reach the recognizer on this path, and push-to-talk
+voice is unavailable until it moves into the native path.
+
 Guards: swipe and chop need an open hand, so pointing, fists and drawing never fire them. While
 drawing, a fist only pauses and lifts the pen, and 🤘 doesn't engage, so the frame stays under the
 sketch. Double tap no longer toggles playback; play/stop are spoken or keys. The thumb–index pinch
-(the old scrub engage) is now only the draw tap. Ink reaches the editor through the assistant's
-`POST /ink` → `ui.set {ink}`, at most 30 Hz, latest wins.
+(the old scrub engage) is now only the draw tap. Ink reaches the editor as the assistant's
+`ui.set {ink}`, latest wins.
 
 The thumb–index tap replaced the handoff's thumb–middle tap at the creator's request (2026-10-11).
 

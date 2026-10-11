@@ -7,9 +7,16 @@ Contract: [interactions](../../docs/wiki/interactions.md).
 | --- | --- |
 | `recognizer.mjs` | Pure, deterministic recognizer (`createRecognizer`, `replay`). Runs in Node and browsers, no build step. |
 | `recognizer.test.mjs` | Replay tests: `node --test surface/gestures/*.test.mjs` (Node ≥ 22, no packages). |
-| `camera.html` | Camera harness: MediaPipe Hand Landmarker → recognizer → hand overlay (skeleton, 🤘 meter, twist dial with dead zone/speed bands/fine detents, tap dot, chop-ready blade line, gesture flash), pose/drawing readout, latency, trace recorder (R). |
-| `hands.mjs` | Browser-only camera open, MediaPipe loop and overlay drawing, shared by `camera.html` and `../demo.html`. |
-| `bridge.mjs` | Gesture events → `shway/adapter.ts` calls (serialized, latest-wins shuttle). Tests: `bridge.test.mjs`. |
+| `hands.mjs` | Browser-only camera open, MediaPipe loop and overlay drawing for `../demo.html` (the Part 1 web demo only). |
+| `bridge.mjs` | Gesture events → `shway/adapter.ts` calls (serialized, latest-wins shuttle), and `createInk` (pointer/pen events → the Program monitor sketch). Tests: `bridge.test.mjs`. |
+
+**The camera runs inside the desktop app's tooling, not a browser.** `node shway/assistant.mjs --port 8793 --editor 127.0.0.1:9876 --proxy http://127.0.0.1:8790 --camera`
+starts [`shway/hands.py`](../../shway/hands.py) with `uv run` (MediaPipe Hand Landmarker on the default webcam,
+one JSON line per frame in the shape `recognizer.mjs` takes). The assistant feeds the frames to the
+recognizer and handles the events in-process (below). A small mirrored preview with the landmarks drawn
+shows as a tile in a corner of the editor that doesn't cover the Program monitor (`ui.set {camera}`).
+`uv run shway/hands.py 1` picks another camera (`--camera 1` on the assistant). There is no keyboard on
+this path: Space, Shift and Esc no longer reach the recognizer.
 | `traces/*.json` | Recorded traces (none yet). Every file is replayed by the tests; names starting `rest` must emit nothing. |
 
 The directory sits outside `apps/` because `apps/*` is a Cargo workspace glob.
@@ -79,11 +86,11 @@ and the queue carries on.
 | `cancel` | `seekTicks(engage / pause playhead)` (`playhead.set {time}`) |
 | `swipe` | `nextEdit` / `prevEdit` (`playhead.nextEdit` / `prevEdit`) |
 | `chop` | `cut()` (`sequence.addEdit`: one undo step) |
-| `draw-toggle`, `pen-down`, `pen-up`, `pointer` | none: ink, handled by the camera page (`review.mjs` `createInk` → assistant `POST /ink` → `ui.set {ink}`). Double tap no longer toggles playback |
+| `draw-toggle`, `pen-down`, `pen-up`, `pointer` | none: ink (`createInk` → `ui.set {ink}`, latest wins). Double tap no longer toggles playback |
+| `chop` | `cut()` here, but `assistant.mjs --camera` doesn't forward it (gesture cuts are parked, DEV-114) |
 
 Run it against the real editor with the demo page: `node surface/build-demo.mjs <editor dist> --out target/demo`,
-serve it, and open `demo.html` (see [surface](../README.md)). `camera.html?editor` still works when
-`camera.html`, `recognizer.mjs`, `hands.mjs` and `bridge.mjs` sit flat beside the editor's `index.html` and `adapter.js`.
+serve it, and open `demo.html` (see [surface](../README.md)).
 
 **Verified 2026-10-10** (browser pane, PR #2 engine build, demo project, synthetic events, no camera):
 - Shuttle 2×: the playhead moved 3.0 s in 1.5 s. Stop works.
@@ -107,8 +114,6 @@ for (const e of r.step(frame)) adapter(e);   // frame: {t, hand, key, fine, canc
 r.view();  // {state, rate, fine, angleDeg, handedness, confidence, horns, hornsRatio, tapping, blade, tapRatio, chopTravel, pose, drawing, penDown, pointer} for on-screen feedback
 ```
 
-`camera.html` exposes `window.shwayGestures.setSink(fn)` to replace its log sink.
-
 | Event | Meaning | Candidate editor call (verify in DEV-87) |
 | --- | --- | --- |
 | `engage` | Control armed; remember playhead for cancel | read playhead (`ui.playback` result / `ui.inspect`) |
@@ -130,7 +135,19 @@ Those method and command names exist in `crates/ui-egui/src/control.rs` and `cra
 swipe contexts against the editor yet. Scrubbing moves the playhead and creates no undo entries; that
 is the adapter's to confirm.
 
-## Part 2 status (2026-10-11)
+## Native camera status (2026-10-11)
+
+- **Verified (tests):** `assistant.test.mjs` replays a fake `hands.py` stream through the real recognizer
+  into the fake editor: pointing → `ui.set {ink}`, a fist → `ui.playback stop`, previews → `ui.set {camera}`,
+  junk lines and worker death are harmless. The editor's tile decoder refuses bad base64, non-JPEG,
+  truncated and oversized frames (`crates/ui-egui/src/camera.rs` tests).
+- **Verified (live, this Mac):** `uv run shway/hands.py` resolves MediaPipe 0.10.21, downloads the model,
+  and with no camera permission prints one `{"error"}` line and exits 1. On a blank frame the CPU
+  landmarker took about 59 ms per frame (the browser's GPU path took about 9 ms).
+- **Not verified:** live hand tracking through the native worker (macOS camera permission was not
+  granted to the process during this check), and so end-to-end latency.
+
+## Part 2 status (2026-10-11, browser page, since removed)
 
 - **Verified (tests):** 37 recognizer replay tests, 9 bridge tests, 8 review tests and the assistant's
   `/ink` + pause/slide tests pass (107 Node tests in all, Node 26.4).

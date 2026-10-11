@@ -52,6 +52,12 @@ without activating itself. UI requests and screenshots that need a rendered fram
 forward without making it key (macOS `orderFrontRegardless`), so the user's typing keeps going to
 the app they are in. Only an explicit `ui.focus` activates FilmCraft.
 
+**Shway camera tile.** `ui.set {camera: "<base64 JPEG>" | null}` shows a webcam preview (≤ 200 KB of
+base64, ≤ 1024 px a side; `shway/assistant.mjs --camera` sends one about every 100 ms) as a 200 pt tile
+in the first corner of the dock that doesn't overlap the Program panel, so `ui.screenshot {panel:"program"}`
+never contains it. Bad frames are ignored (the last good one stays); `null` clears it; it hides 2 s after
+the last frame. It is not part of `ui.inspect`.
+
 Element ids are stable, e.g. `timeline.clip.<id>`, `timeline.track.V1.lock`, `tools.Razor`,
 `project.item.<id>`, `effects.item.gaussian_blur`, `panel.tab.Timeline`, `program.transport.playback.toggle`.
 

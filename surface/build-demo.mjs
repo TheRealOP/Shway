@@ -26,7 +26,7 @@ await cp(src, dst, { recursive: true });
 // outputs outside this checkout's target/ or dist/.
 execFileSync(process.execPath, [resolve(here, "../shway/build.mjs"), "--out", dst], { stdio: "inherit" });
 for (const f of ["demo.html", "demo.mjs", "gestures/recognizer.mjs", "gestures/bridge.mjs", "gestures/hands.mjs",
-  "gestures/camera.html", "voice/utterance.mjs", "voice/mic.mjs", "voice/voice.html"]) {
+  "voice/utterance.mjs", "voice/mic.mjs", "voice/voice.html"]) {
   await mkdir(dirname(resolve(dst, f)), { recursive: true });
   await cp(resolve(here, f), resolve(dst, f));
 }

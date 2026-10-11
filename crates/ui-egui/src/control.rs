@@ -8,7 +8,7 @@
 //! - `engine.commands`: list engine commands; `ui.menu.list`: menu tree with enablement
 //! - `ui.inspect`: UI state + every registered widget (`elements`: id, label, rect)
 //! - `ui.elements {prefix?}`: registered widgets (optionally filtered by id prefix)
-//! - `ui.set {tool?, workspace?, mode?, theme?, focused?, assistant?, playbackRes?, timeline?:{pps,scroll}, ink?}`
+//! - `ui.set {tool?, workspace?, mode?, theme?, focused?, assistant?, playbackRes?, timeline?:{pps,scroll}, ink?, camera?}`
 //! - `ui.panel.show {panel}` / `ui.panel.close {panel}`
 //! - `ui.click {id | x,y, button?, count?, modifiers?}` / `ui.move {x,y}` / `ui.scroll {x,y,dx,dy}`
 //! - `ui.drag {from:{id|x,y}, to:{id|x,y}, steps?, modifiers?}`: synthetic press-move-release
@@ -210,6 +210,10 @@ pub fn handle(app: &mut FilmcraftApp, ctx: &egui::Context, req: &ControlRequest)
             // Shway ink overlay (`state::Ink`): lenient, bad points are dropped rather than failing
             if let Some(v) = p.get("ink") {
                 app.ui.ink.patch(v);
+            }
+            // Shway webcam tile (`camera`): base64 JPEG or null; bad frames are ignored
+            if let Some(v) = p.get("camera") {
+                crate::camera::set(&mut app.camera, ctx, v);
             }
             // Export mode state (`panels::export_mode::ExportUi`), deep-merged; `"preset": name`
             // applies that preset's settings first
