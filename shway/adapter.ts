@@ -33,7 +33,12 @@ export interface MoveStep {
   command: "timeline.move";
   params: {clip: number; anchor: number; position: "before" | "after"};
 }
-export type ProposalStep = TrimStep | ReplaceStep | PlaceStep | RemoveStep | MoveStep;
+// A two-sided video transition at one edge of a clip (sketch → edit); direction only for push.
+export interface TransitionStep {
+  command: "sequence.applyVideoTransition";
+  params: {clip: number; effect: "split" | "push" | "iris_round"; edge: "in" | "out"; direction?: "left" | "right"};
+}
+export type ProposalStep = TrimStep | ReplaceStep | PlaceStep | RemoveStep | MoveStep | TransitionStep;
 export interface EditProposal {
   expectedRevision: number;
   sequence: number;
@@ -195,6 +200,15 @@ function proposalInput(value: EditProposal): EditProposal {
       if (params.position !== "before" && params.position !== "after") invalid("move position must be before or after");
       targets += 2;
       return {command: step.command, params: {clip, anchor, position: params.position}};
+    }
+    if (step.command === "sequence.applyVideoTransition") {
+      keys(params, ["clip", "effect", "edge", "direction"], "transition");
+      const clip = integer(params.clip, "clip", 1);
+      if (params.effect !== "split" && params.effect !== "push" && params.effect !== "iris_round") invalid("transition effect must be split, push or iris_round");
+      if (params.edge !== "in" && params.edge !== "out") invalid("transition edge must be in or out");
+      if (params.direction !== undefined && (params.effect !== "push" || (params.direction !== "left" && params.direction !== "right"))) invalid("only push takes a direction, left or right");
+      targets += 1;
+      return {command: step.command, params: {clip, effect: params.effect, edge: params.edge, ...(params.direction === undefined ? {} : {direction: params.direction})}};
     }
     return invalid(`Unsupported proposal command: ${String(step.command)}`);
   });

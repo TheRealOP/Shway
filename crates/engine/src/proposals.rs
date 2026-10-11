@@ -48,7 +48,30 @@ enum Step {
     Remove(Remove),
     #[serde(rename = "timeline.move")]
     Move(Move),
+    #[serde(rename = "sequence.applyVideoTransition")]
+    Transition(Transition),
 }
+
+/// A two-sided video transition at one edge of an explicit clip, from a short allowlist.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Transition {
+    clip: u64,
+    effect: String,
+    edge: Edge,
+    /// Push only: which way the picture travels.
+    #[serde(default)]
+    direction: Option<Side>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Side {
+    Left,
+    Right,
+}
+
+const TRANSITIONS: [&str; 3] = ["split", "push", "iris_round"];
 
 /// Ripple-delete explicit clips (with their linked partners); later material closes the gap.
 #[derive(Deserialize)]
@@ -398,7 +421,33 @@ fn apply(s: &mut Session, step: Step) -> Result<Value> {
             Ok(json!({"removed":clips.iter().map(|c| c.0).collect::<Vec<_>>(),"closed":closed}))
         }
         Step::Move(p) => rearrange(s, &p),
+        Step::Transition(p) => transition(s, &p),
     }
+}
+
+fn transition(s: &mut Session, p: &Transition) -> Result<Value> {
+    if !TRANSITIONS.contains(&p.effect.as_str()) {
+        return Err(bad(format!("transition must be one of {}", TRANSITIONS.join(", "))));
+    }
+    targets(s, &[p.clip])?;
+    let (edge, mut params) = match p.edge {
+        Edge::In => ("in", json!({})),
+        Edge::Out => ("out", json!({})),
+    };
+    match (&p.direction, p.effect.as_str()) {
+        (None, _) => {}
+        (Some(side), "push") => params["direction"] = json!(if matches!(side, Side::Left) { "From East" } else { "From West" }),
+        (Some(_), _) => return Err(bad("only push takes a direction")),
+    }
+    let result = s.execute("sequence.applyVideoTransition", json!({"clip":p.clip,"effect":p.effect,"edge":edge,"params":params}))?;
+    let id = result.get("transition").and_then(Value::as_u64).ok_or_else(|| bad("transition was not created"))?;
+    let q = s.active_sequence().ok_or(EngineError::NoSequence)?;
+    let made = q.all_tracks().flat_map(|t| &t.transitions).find(|t| t.id.0 == id).ok_or_else(|| bad("transition was not created"))?;
+    // A sketch joins two shots; a fade to or from nothing is a different edit.
+    if made.from.is_none() || made.to.is_none() {
+        return Err(bad(format!("clip {} has no adjacent clip at its {edge} edge", p.clip)));
+    }
+    Ok(result)
 }
 
 /// Insert-move the clip to the anchor's edge (`timeline.move`), then close the hole it left
