@@ -290,6 +290,7 @@ export function createAssistant({ editor = "127.0.0.1:9876", proxy = "http://127
     const a = await getAdapter();
     await a.stop();
     const now = await a.playhead();
+    if (now !== m.playhead) await a.seekTicks(m.playhead); // edits that use the playhead (insert_take) act at the moment
     moment = m;
     const marked = now !== m.playhead && gestures.some((g) => ["shuttle", "step", "swipe"].includes(g.type));
     const range = marked ? `, marking ${sec(Math.min(m.playhead, now))}–${sec(Math.max(m.playhead, now))} s` : "";
