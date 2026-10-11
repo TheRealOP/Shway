@@ -31,7 +31,7 @@ Spend up to one hour testing GPU feasibility early; let genuine baseline inferen
 | --- | --- |
 | [DEV-94](https://linear.app/dev-system/issue/DEV-94) | Exposure correction and dialogue-aware music refinement |
 | [DEV-95](https://linear.app/dev-system/issue/DEV-95) | One gesture sensitivity correction and scoped creative preference |
-| [DEV-96](https://linear.app/dev-system/issue/DEV-96) / [DEV-97](https://linear.app/dev-system/issue/DEV-97) | GPU benchmark and version-bound TRIBE comparison |
+| [DEV-96](https://linear.app/dev-system/issue/DEV-96) / [DEV-97](https://linear.app/dev-system/issue/DEV-97) | Tabled for the hackathon (October 11, 2026), see [Decisions](decisions.md): GPU benchmark and version-bound TRIBE comparison |
 
 ## Future backlog
 

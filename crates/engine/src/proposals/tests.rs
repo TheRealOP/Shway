@@ -713,3 +713,66 @@ fn move_that_would_close_a_foreign_gap_or_split_sync_locked_music_is_rejected() 
     assert!(Arc::ptr_eq(&s.project, &base));
     assert!(s.proposal.is_none());
 }
+
+fn join(clip: u64, effect: &str, edge: &str) -> Value {
+    json!({"command":"sequence.applyVideoTransition","params":{"clip":clip,"effect":effect,"edge":edge}})
+}
+
+#[test]
+fn sketch_transition_follows_a_move_and_commits_as_one_undo_step() {
+    let (mut s, pairs, _) = cut_fixture();
+    let base = s.project.clone();
+    let undo = s.history.undo.len();
+    // "Use this video afterwards": the last shot moves after the first, then splits in from it.
+    let p = edit(&s, json!([rearrange(pairs[3].0, pairs[0].0, "after"), join(pairs[3].0, "split", "in")]));
+    let token = run(&mut s, p);
+    assert!(Arc::ptr_eq(&s.project, &base), "staged only");
+    s.execute("proposal.commit", json!({"token":token})).unwrap();
+    assert_eq!(s.history.undo.len(), undo + 1);
+    let (v, _, synced) = layout(&s);
+    assert!(synced);
+    assert_eq!(ids(&v), [0, 3, 1, 2].map(|n| pairs[n].0).to_vec(), "the moved clip keeps its id");
+    let t = &s.active_sequence().unwrap().video_tracks[0].transitions;
+    assert_eq!(t.len(), 1);
+    assert_eq!((t[0].effect.effect.as_str(), t[0].from, t[0].to), ("split", Some(ClipId(pairs[0].0)), Some(ClipId(pairs[3].0))));
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(*s.project, *base);
+
+    // Push takes the arrow's direction.
+    let mut push = join(pairs[1].0, "push", "out");
+    push["params"]["direction"] = json!("left");
+    let p = edit(&s, json!([push]));
+    let token = run(&mut s, p);
+    s.execute("proposal.commit", json!({"token":token})).unwrap();
+    let t = &s.active_sequence().unwrap().video_tracks[0].transitions[0];
+    assert_eq!(t.effect.param("direction").map(|p| &p.value), Some(&filmcraft_project::ParamValue::Choice(1)), "From East");
+}
+
+#[test]
+fn hostile_transition_steps_are_rejected_without_a_candidate() {
+    let (mut s, pairs, _) = cut_fixture();
+    let mut directed = join(pairs[1].0, "split", "out");
+    directed["params"]["direction"] = json!("left");
+    let cases = [
+        ("not allowed", json!([join(pairs[1].0, "cross_dissolve", "out")]), "must be one of split, push, iris_round"),
+        ("display name", json!([join(pairs[1].0, "Split", "out")]), "must be one of"),
+        ("direction", json!([directed]), "only push"),
+        ("no neighbour", json!([join(pairs[0].0, "split", "in")]), "no adjacent clip"),
+        ("unknown clip", json!([join(999_999, "split", "in")]), "missing clip"),
+        ("edge", json!([join(pairs[1].0, "split", "middle")]), "invalid parameters"),
+        (
+            "extra",
+            json!([{"command":"sequence.applyVideoTransition","params":{"clip":pairs[1].0,"effect":"split","edge":"in","frames":9999}}]),
+            "invalid parameters",
+        ),
+    ];
+    let base = s.project.clone();
+    let history = s.history.undo.clone();
+    for (name, steps, expected) in cases {
+        let error = s.execute("proposal.preview", edit(&s, steps)).unwrap_err().to_string();
+        assert!(error.contains(expected), "{name}: {error}");
+        assert!(Arc::ptr_eq(&s.project, &base), "{name}");
+        assert_eq!(s.history.undo, history, "{name}");
+        assert!(s.proposal.is_none(), "{name}");
+    }
+}

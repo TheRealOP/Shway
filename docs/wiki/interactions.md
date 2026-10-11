@@ -12,7 +12,7 @@ A gesture must visibly identify its mode, target, and effect.
 
 | Input | Meaning | Guard |
 | --- | --- | --- |
-| Pinch or explicit screen/key engagement | Arm the selected control | Target and armed indicator visible |
+| 🤘 pose (was pinch) or explicit screen/key engagement | Arm the selected control | Target and armed indicator visible |
 | Relative hand twist while engaged | Signed scrub/shuttle speed | Neutral dead zone, limits; release stops |
 | Deliberate left/right swipe | Navigate clips or alternative takes | Context label, temporal threshold, cooldown |
 | Reject gesture + spoken correction | Propose take replacement | Visible current take and reversible preview |
@@ -20,9 +20,54 @@ A gesture must visibly identify its mode, target, and effect.
 
 Reject and split-at-playhead are separate commands. An upward motion does not silently mean “more tension.”
 
+## Part 2 gesture grammar (2026-10-11)
+
+One gesture, one meaning. Thresholds live in `DEFAULTS` in
+[surface/gestures/recognizer.mjs](../../surface/gestures/recognizer.mjs); details and events in the
+[gestures README](../../surface/gestures/README.md).
+
+| Hand | Mode | Effect | Status |
+| --- | --- | --- | --- |
+| Index out, other fingers curled ("point") | Laser pointer (default) | A dot follows the fingertip over the Program monitor picture | Verified in replay tests; live camera not verified |
+| Quick thumb–index **double tap** | Draw toggle | 1st: drawing on, point = pen down, any other pose = pen up. 2nd: sketch finished, stays on screen, back to laser pointer. A held pinch does nothing; the tap freezes the pointer and lifts the pen | Verified in replay tests; live camera not verified |
+| Fist held ~150 ms | Pause | Stops playback. Passing through a fist doesn't count | Verified in replay and bridge tests; live not verified |
+| Fist slid left/right | Slider scrub | Playhead = playhead at the pause + 20 s × offset across the active box (absolute, dead zone). Open the hand to drop it there | Verified in replay, bridge and assistant tests; live not verified |
+| 🤘 held | Shuttle | Engage; wrist twist = speed, Shift = frame steps, unchanged | Verified in replay tests; live not verified |
+| Esc | Cancel | Clears the sketch; a scrub returns to where the fist / 🤘 started | Verified in replay and bridge tests |
+
+Guards: swipe and chop need an open hand, so pointing, fists and drawing never fire them. While
+drawing, a fist only pauses and lifts the pen, and 🤘 doesn't engage, so the frame stays under the
+sketch. Double tap no longer toggles playback; play/stop are spoken or keys. The thumb–index pinch
+(the old scrub engage) is now only the draw tap. Ink reaches the editor through the assistant's
+`POST /ink` → `ui.set {ink}`, at most 30 Hz, latest wins.
+
+The thumb–index tap replaced the handoff's thumb–middle tap at the creator's request (2026-10-11).
+
+## Sketch vocabulary (2026-10-11, DEV-93)
+
+One finished sketch, one edit. When a chat message arrives while a finished sketch (strokes, drawing
+off) is on the Program monitor, the assistant takes `ui.screenshot {panel:"program"}` (frame + ink)
+and asks the vision model (`gemini-3.1-pro-preview`) to **classify** it into a fixed enum. Code maps
+the figure to the effect; the chat model (Flash) only picks the clips through the `transition`
+action. "Use this video afterwards" = the named or selected clip plays right after the current one:
+one proposal holds `timeline.move` (only when that clip doesn't already follow) and
+`sequence.applyVideoTransition` at the cut, so preview, Accept/Reject and one undo work as for every
+assistant edit. The ink is cleared after Accept or Reject. Code: [shway/assistant.mjs](../../shway/assistant.mjs),
+step: `crates/engine/src/proposals.rs`.
+
+| Figure | Edit | Status |
+| --- | --- | --- |
+| `split_outward`: a line with two arrows pointing apart | `split` transition between the two clips | Verified in assistant, adapter and Rust proposal tests (fake editor and model); live drawing, vision reading and editor not verified |
+| `arrow_left` / `arrow_right` | `push` transition, that direction | Same as above |
+| `circle` | `iris_round` transition | Same as above |
+| `unknown` (or anything outside the enum) | Reply with what it saw; nothing changes; the sketch stays | Verified in assistant tests |
+
+Refusals are replies, not errors: an oversized Program picture (> 6 MB PNG), a stale revision, or
+the engine refusing the edit (no neighbouring clip, locked track) each say so and change nothing.
+
 ## State model
 
-Idle → Targeting → Armed → Adjusting → Preview → Committed.
+Idle → Targeting → Armed → Adjusting → Preview → Committed. The recognizer adds a Fist state (paused, sliding).
 Cancelled and TrackingLost restore or preserve the pre-action state and require re-engagement.
 
 The finite-state transducer handles discrete events and action boundaries.

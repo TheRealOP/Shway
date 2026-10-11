@@ -8,7 +8,7 @@
 //! - `engine.commands`: list engine commands; `ui.menu.list`: menu tree with enablement
 //! - `ui.inspect`: UI state + every registered widget (`elements`: id, label, rect)
 //! - `ui.elements {prefix?}`: registered widgets (optionally filtered by id prefix)
-//! - `ui.set {tool?, workspace?, mode?, theme?, focused?, playbackRes?, timeline?:{pps,scroll}}`
+//! - `ui.set {tool?, workspace?, mode?, theme?, focused?, assistant?, playbackRes?, timeline?:{pps,scroll}, ink?}`
 //! - `ui.panel.show {panel}` / `ui.panel.close {panel}`
 //! - `ui.click {id | x,y, button?, count?, modifiers?}` / `ui.move {x,y}` / `ui.scroll {x,y,dx,dy}`
 //! - `ui.drag {from:{id|x,y}, to:{id|x,y}, steps?, modifiers?}`: synthetic press-move-release
@@ -157,6 +157,12 @@ pub fn handle(app: &mut FilmcraftApp, ctx: &egui::Context, req: &ControlRequest)
             if let Some(f) = s("focused").and_then(PanelKind::from_name) {
                 app.ui.focused = f;
             }
+            // the Shway chat panel on show or hidden (View ▸ Assistant Chat)
+            if let Some(on) = p.get("assistant").and_then(Value::as_bool)
+                && on != crate::menus::panel_shown(app, PanelKind::Assistant)
+            {
+                app.toggle_panel(PanelKind::Assistant);
+            }
             if let Some(r) = s("playbackRes") {
                 app.ui.program.res = PlaybackRes::ALL
                     .into_iter()
@@ -200,6 +206,10 @@ pub fn handle(app: &mut FilmcraftApp, ctx: &egui::Context, req: &ControlRequest)
                     Ok(m) => *mv = m,
                     Err(e) => return err(format!("`{k}`: {e}")),
                 }
+            }
+            // Shway ink overlay (`state::Ink`): lenient, bad points are dropped rather than failing
+            if let Some(v) = p.get("ink") {
+                app.ui.ink.patch(v);
             }
             // Export mode state (`panels::export_mode::ExportUi`), deep-merged; `"preset": name`
             // applies that preset's settings first
@@ -437,6 +447,7 @@ pub fn inspect(app: &FilmcraftApp, ctx: &egui::Context) -> Value {
         "selection": app.session.state.selection.iter().map(|c| c.0).collect::<Vec<_>>(),
         "elements": app.auto.previous.len(),
         "dialog": app.dialog.map(|d| format!("{d:?}")),
+        "assistant": crate::menus::panel_shown(app, PanelKind::Assistant),
     })
 }
 

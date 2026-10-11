@@ -525,6 +525,57 @@ pub struct UiState {
     /// Shway Assistant panel: the conversation, proposed edit and draft. See `panels::assistant`.
     #[serde(default)]
     pub assistant: crate::panels::assistant::AssistantUi,
+    /// Shway ink overlay on the Program monitor (pointer + strokes). See [`Ink`].
+    #[serde(default)]
+    pub ink: Ink,
+}
+
+/// Ink drawn over the Program monitor's picture by the gesture surface (DEV-91): a pointer and
+/// freehand strokes, normalised 0–1 over the frame picture (the letterboxed video rect). Set with
+/// `ui.set {ink}`; painted by `panels::monitor`, so `ui.screenshot {panel:"program"}` includes it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Ink {
+    pub pointer: Option<[f32; 2]>,
+    pub strokes: Vec<Vec<[f32; 2]>>,
+    pub drawing: bool,
+}
+
+impl Ink {
+    pub const MAX_STROKES: usize = 20;
+    pub const MAX_POINTS: usize = 500;
+
+    /// Apply a `ui.set {ink}` patch from an untrusted client: `null` clears; present keys replace
+    /// (`pointer`, `strokes`, `drawing`), absent keys are kept. Points that are not `[x, y]` with
+    /// both in 0–1 are dropped, strokes and points past the caps are ignored; never fails.
+    pub fn patch(&mut self, p: &serde_json::Value) {
+        if p.is_null() {
+            *self = Self::default();
+            return;
+        }
+        if let Some(v) = p.get("pointer") {
+            self.pointer = ink_point(v);
+        }
+        if let Some(v) = p.get("drawing") {
+            self.drawing = v.as_bool().unwrap_or(false);
+        }
+        if let Some(v) = p.get("strokes") {
+            let strokes = v.as_array().map(Vec::as_slice).unwrap_or_default();
+            self.strokes = strokes
+                .iter()
+                .filter_map(|s| {
+                    let pts: Vec<[f32; 2]> = s.as_array()?.iter().filter_map(ink_point).take(Self::MAX_POINTS).collect();
+                    (!pts.is_empty()).then_some(pts)
+                })
+                .take(Self::MAX_STROKES)
+                .collect();
+        }
+    }
+}
+
+fn ink_point(v: &serde_json::Value) -> Option<[f32; 2]> {
+    let [x, y] = v.as_array()?.as_slice() else { return None };
+    let (x, y) = (x.as_f64()? as f32, y.as_f64()? as f32);
+    ((0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y)).then_some([x, y])
 }
 
 /// An open Edit / Clip / File menu dialog: the engine command it runs on OK and the parameters
@@ -925,6 +976,7 @@ impl Default for UiState {
             project_panel: Default::default(),
             media_browser: Default::default(),
             assistant: Default::default(),
+            ink: Ink::default(),
         }
     }
 }

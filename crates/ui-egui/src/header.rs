@@ -93,6 +93,10 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     if btn(ui, Icon::Fullscreen, "fullscreen", tl!("Full screen"), app).clicked() {
         run(app, "view.windowFullscreen");
     }
+    // the Assistant chat: one click hides it, another brings it back (View ▸ Assistant Chat)
+    if btn(ui, Icon::Chat, "assistant", tl!("Assistant chat (Cmd+J)"), app).clicked() {
+        run(app, "view.assistant");
+    }
     let focus_icon = if app.ui.focus_mode { Icon::EyeOff } else { Icon::Eye };
     if btn(ui, focus_icon, "focusMode", tl!("Focus Mode"), app).clicked() {
         run(app, "view.focusMode");
@@ -107,7 +111,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         app.ui.mode = Mode::Export;
     }
     // Quick Export: a popup with File Name & Location, a preset list and Export (Premiere 26)
-    let qx = rect.max.x - 14.0 - 5.0 * 38.0; // the sixth button from the right
+    let qx = rect.max.x - 14.0 - 6.0 * 38.0; // the seventh button from the right
     if btn(ui, Icon::Export, "quickExport", tl!("Quick Export"), app).clicked() {
         app.ui.export.quick_open = !app.ui.export.quick_open;
         ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("quick-export-toggled"), true));

@@ -157,9 +157,9 @@
     </dl>
     <table aria-label="Panel keys and gestures">
       <tr><td><kbd>A</kbd> / double tap*</td><td>accept preview</td></tr>
-      <tr><td><kbd>X</kbd> / still pinch 0.8 s*</td><td>reject preview (then say why)</td></tr>
+      <tr><td><kbd>X</kbd> / still 🤘 0.8 s*</td><td>reject preview (then say why)</td></tr>
       <tr><td><kbd>U</kbd></td><td>undo last edit</td></tr>
-      <tr><td><kbd>V</kbd> hold / still pinch 0.8 s</td><td>push-to-talk</td></tr>
+      <tr><td><kbd>V</kbd> hold / still 🤘 0.8 s</td><td>push-to-talk</td></tr>
       <tr><td><kbd>Space</kbd> hold, <kbd>Shift</kbd></td><td>engage / fine (with a hand)</td></tr>
       <tr><td><kbd>Esc</kbd></td><td>cancel talk / scrub</td></tr>
     </table>
@@ -209,8 +209,8 @@ function onGesture(e) {
   voice.gesture(e);
   flash = flashFor(e, e.t) ?? flash;
   $("last").textContent = e.type + (e.rate !== undefined ? ` ${e.rate}×` : e.frames !== undefined ? ` ${e.frames}` : e.direction ? ` ${e.direction}` : "");
-  // Double tap means play/pause, except while a preview is pending: then it accepts (shown in "effect").
-  if (e.type === "double-tap" && proposals.pending) return proposals.accept();
+  // Thumb–middle double tap toggles drawing; while a preview is pending it accepts instead (shown in "effect").
+  if (e.type === "draw-toggle" && proposals.pending) return proposals.accept();
   if (bridge) bridge(e); else $("last").textContent += " (editor not connected)";
 }
 function onFrame(t, hand) {
@@ -380,10 +380,10 @@ function render() {
   $("state").textContent = rec.recording ? "Talking" : v.state; $("state").dataset.s = v.state;
   const sel = context.target ? `clip ${context.target}` : context.selection.length ? `${context.selection.length} clips selected` : "no clip selected";
   let mode, target, effect;
-  if (rec.recording) [mode, target, effect] = ["Talk", sel, "let go of the pinch / V to finish · Esc cancels"];
+  if (rec.recording) [mode, target, effect] = ["Talk", sel, "let go of the 🤘 / V to finish · Esc cancels"];
   else if (v.state === "Armed" || v.state === "Adjusting") [mode, target, effect] = [v.fine ? "Fine step" : `Shuttle ${v.rate}×`, "playhead", v.fine ? "twist steps frames" : "twist sets speed · release keeps position · Esc returns"];
-  else if (p) [mode, target, effect] = [p.source === "tribe" ? "Suggestion" : "Preview", p.label, "double tap / A accepts · still pinch / X rejects and talks"];
-  else [mode, target, effect] = ["Navigate", "playhead", "pinch+twist scrubs · swipe next/prev edit · chop cuts · double tap play/pause · still pinch talks"];
+  else if (p) [mode, target, effect] = [p.source === "tribe" ? "Suggestion" : "Preview", p.label, "double tap / A accepts · still 🤘 / X rejects and talks"];
+  else [mode, target, effect] = ["Navigate", "playhead", "🤘+twist scrubs · fist pauses, slide scrubs · swipe next/prev edit · chop cuts · still 🤘 talks"];
   if (v.state === "TrackingLost" || v.state === "Cancelled") effect = LABELS[v.state];
   $("mode").textContent = mode; $("target").textContent = target; $("effect").textContent = effect;
   ptt.dataset.rec = String(rec.recording); ptt.setAttribute("aria-pressed", String(rec.recording));
@@ -453,7 +453,7 @@ async function setCamera(on) {
     } else {
       for (const track of video.srcObject?.getTracks() ?? []) track.stop();
       video.srcObject = null;
-      onFrame(performance.now(), null); // normal tracking loss first: stops a shuttle, aborts a pinch-held recording
+      onFrame(performance.now(), null); // normal tracking loss first: stops a shuttle, aborts a 🤘-held recording
       recognizer = createRecognizer(); hold = createHoldToTalk(); // then back to Idle
       lastHand = null; flash = null;
       const c = $("o"); c.getContext("2d")?.clearRect(0, 0, c.width, c.height);

@@ -4,7 +4,7 @@
 
 /**
  * @typedef {{
- *   shuttle(speed: number): Promise<unknown>, stop(): Promise<unknown>, togglePlay(): Promise<unknown>,
+ *   shuttle(speed: number): Promise<unknown>, stop(): Promise<unknown>,
  *   stepFrames(frames: number): Promise<unknown>, playhead(): Promise<number>, seekTicks(t: number): Promise<unknown>,
  *   nextEdit(): Promise<unknown>, prevEdit(): Promise<unknown>, cut(): Promise<unknown>,
  * }} GestureAdapter
@@ -15,10 +15,13 @@
  * @param {{onError?: (e: unknown, event: {type: string}) => void}} [opts]
  * @returns {(event: import("./recognizer.mjs").GestureEvent) => Promise<void>}
  */
+const TPS = 254016000000; // filmcraft_time ticks per second
+
 export function createBridge(adapter, { onError } = {}) {
   let queue = Promise.resolve();
-  /** @type {number | null} */ let engagedAt = null; // playhead (ticks) to restore on cancel
+  /** @type {number | null} */ let engagedAt = null; // playhead (ticks) at engage / pause: cancel restores it, slide is relative to it
   /** @type {number | null} */ let rate = null; // latest shuttle rate not yet sent
+  /** @type {number | null} */ let slide = null; // latest slide offset (s) not yet sent
 
   // Calls run one at a time, in order; a failure is reported and the queue carries on.
   const run = (/** @type {{type: string}} */ e, /** @type {() => Promise<unknown>} */ fn) =>
@@ -38,6 +41,18 @@ export function createBridge(adapter, { onError } = {}) {
           if (r === null) return;
           await (r === 0 ? adapter.stop() : adapter.shuttle(r));
         });
+      case "pause":
+        engagedAt = null;
+        return run(e, async () => { await adapter.stop(); engagedAt = await adapter.playhead(); });
+      case "slide":
+        slide = e.seconds;
+        // Latest wins, like shuttle. A seek moves the playhead only: no undo entry.
+        return run(e, async () => {
+          const s = slide;
+          slide = null;
+          if (s === null || engagedAt === null || !Number.isFinite(s)) return;
+          await adapter.seekTicks(Math.max(0, Math.round(engagedAt + s * TPS)));
+        });
       case "step":
         return run(e, () => adapter.stepFrames(e.frames));
       case "cancel":
@@ -52,8 +67,6 @@ export function createBridge(adapter, { onError } = {}) {
         return run(e, () => (e.direction === "right" ? adapter.nextEdit() : adapter.prevEdit()));
       case "chop":
         return run(e, () => adapter.cut());
-      case "double-tap":
-        return run(e, () => adapter.togglePlay());
       default:
         return queue;
     }

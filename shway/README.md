@@ -24,8 +24,10 @@ contains human-readable parameter descriptions; it is not itself a strict JSON s
 and Rust's typed deserializer validate the allowlisted proposal shape.
 
 The supported proposal steps are `timeline.trim`, `clip.replaceFromBin`, `timeline.place`,
-`timeline.remove` (`{clips}`: ripple delete with linked partners) and `timeline.move`
-(`{clip, anchor, position: "before"|"after"}`: rearrange on one track; counts as two references). Proposals explicitly name
+`timeline.remove` (`{clips}`: ripple delete with linked partners), `timeline.move`
+(`{clip, anchor, position: "before"|"after"}`: rearrange on one track; counts as two references) and
+`sequence.applyVideoTransition` (`{clip, effect: "split"|"push"|"iris_round", edge: "in"|"out",
+direction?: "left"|"right"}` for push: a two-sided transition at that cut; sketch → edit). Proposals explicitly name
 expected revision, active sequence, target clips, source IDs, and frame deltas. Requests are limited
 to 16 steps, 32 total explicit target references, and labels of at most 120 UTF-8 bytes. Rust stages them in a
 disposable session. `previewFrame` returns bounded RGBA pixels from that candidate without changing
@@ -143,9 +145,11 @@ node shway/gemini-server.mjs --port 8790      # reads GEMINI_API_KEY (optional G
 
 - **Key file:** the `.env` lives beside the main checkout (found through `git rev-parse --git-common-dir`),
   so every worktree uses one file. `SHWAY_ENV=/path/.env` overrides it. `.env` is excluded from git.
-- **`POST /generate`:** body `{prompt, system?, schema?, model?}`. It returns `{model, usage, text}`,
+- **`POST /generate`:** body `{prompt, system?, schema?, model?, images?}`. It returns `{model, usage, text}`,
   or `{model, usage, json}` when you pass a `schema`. A `schema` is a Gemini `responseSchema`
-  (OpenAPI subset: `OBJECT`, `STRING`, …).
+  (OpenAPI subset: `OBJECT`, `STRING`, …). `images` is at most one `{mimeType: "image/png"|"image/jpeg",
+  data: base64}` of at most 6 MB (a Program monitor screenshot), sent inline before the prompt; bodies
+  may be up to 9 MB on this route.
 - **`POST /transcribe`:** body `{mimeType, data}`. `mimeType` is `audio/webm`, `audio/ogg`,
   `audio/mp4` or `audio/wav`; a codec parameter such as `;codecs=opus` is allowed. `data` is base64.
   The route sends the audio inline to Gemini with an instruction to transcribe verbatim and returns
@@ -335,8 +339,8 @@ node --test shway/assistant.test.mjs                    # fake editor (TCP) + fa
    folded into its video clip.
 3. Gemini (`POST {proxy}/generate` with a response schema) picks one action from the allowlist. Each
    action has its own nested object, and every field in it is required: `answer`, `remove{clips}`,
-   `trim{clip, edge, direction, amount, unit}`, `move{clip, target, position}` and
-   `replace_take{correction}`.
+   `trim{clip, edge, direction, amount, unit}`, `move{clip, target, position}`,
+   `replace_take{correction}` and, only while a finished sketch is shown, `transition{from, to}`.
 4. Validation rejects any other field, unknown clip ids, amounts that are not positive, trims past
    the clip length or the media handles, and moves onto the same clip, its linked partner or another
    track. An invalid answer gets one
@@ -351,6 +355,17 @@ node --test shway/assistant.test.mjs                    # fake editor (TCP) + fa
    the selected clip with the `--takes` index. It uses Jev when the proxy reports `jev: true`, and
    Gemini otherwise. Nothing commits until `/chat/accept`.
 7. A stale revision, at preview or at accept, cancels the preview and asks the creator to retry.
+
+**Sketch → edit (DEV-93).** The assistant remembers the latest ink it forwarded (`POST /ink`). If a
+chat message arrives while a finished sketch is shown (strokes, `drawing: false`), it first takes
+`ui.screenshot {panel:"program"}` (written to a temp file, read, deleted; > 6 MB is refused), then asks
+`gemini-3.1-pro-preview` to classify the drawing with the PNG and the strokes: `split_outward` →
+`split`, `arrow_left`/`arrow_right` → `push` that way, `circle` → `iris_round`, `unknown` → a reply
+describing it, nothing changes. Flash then picks `transition{from, to}`; the proposal is
+`timeline.move {clip: to, anchor: from, position: "after"}` when `to` doesn't already follow, then
+`sequence.applyVideoTransition {clip: from, effect, edge: "out"}`. Accept or Reject clears the ink
+(`ui.set {ink: null}`). Live drawing and the vision reading are not verified yet
+([interactions](../docs/wiki/interactions.md#sketch-vocabulary-2026-10-11-dev-93)).
 
 **Not supported yet:**
 

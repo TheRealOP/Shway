@@ -37,16 +37,16 @@ export async function runHands(video, onFrame) {
 
 /** Big on-video text for a discrete gesture, or null. */
 export function flashFor(e, t) {
-  const text = { swipe: e.direction === "right" ? "→" : "←", "double-tap": "double tap", chop: "✂ cut" }[e.type];
+  const text = { swipe: e.direction === "right" ? "→" : "←", "draw-toggle": e.drawing ? "✎ draw" : "✎ done", pause: "❚❚", chop: "✂ cut" }[e.type];
   return text ? { text, until: t + 600 } : null;
 }
 
-// ---- Overlay: skeleton, pinch meter, twist dial, swipe flash. Drawn in unmirrored canvas space
+// ---- Overlay: skeleton, 🤘 meter, twist dial, swipe flash. Drawn in unmirrored canvas space
 // with x flipped so it lines up with the mirrored video and text stays readable.
 const BONES = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],
   [9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
 const COLORS = { Idle: "#bbb", Armed: "#2c9", Adjusting: "#3cf", TrackingLost: "#f80", Cancelled: "#f80" };
-export const LABELS = { Idle: "pinch or hold Space", Armed: "armed — twist to scrub", Adjusting: "scrubbing",
+export const LABELS = { Idle: "🤘 or hold Space to scrub", Fist: "paused — slide to scrub, open to drop", Armed: "armed — twist to scrub", Adjusting: "scrubbing",
   TrackingLost: "tracking lost — let go to re-engage", Cancelled: "cancelled — let go to re-engage" };
 
 /** @param {{text: string, until: number} | null} flash */
@@ -90,13 +90,13 @@ export function drawOverlay(canvas, hand, v, now, flash) {
     g.fillStyle = "#fc3"; g.beginPath(); g.arc(P[4].x, P[4].y, 10, 0, 7); g.fill();
   }
   if (!engaged) {
-    // Pinch meter: thumb–index line + ring that fills as the pinch closes.
-    const fill = Number.isFinite(v.pinchRatio) ? Math.max(0, Math.min(1, (1.2 - v.pinchRatio) / (1.2 - C.pinchOn))) : 0;
+    // 🤘 meter: thumb–middle line + ring that fills as the thumb closes on the middle and ring tips.
+    const fill = Number.isFinite(v.hornsRatio) ? Math.max(0, Math.min(1, (1.2 - v.hornsRatio) / (1.2 - C.hornsOn))) : 0;
     g.strokeStyle = fill >= 1 ? "#2c9" : "rgba(255,255,255,0.7)"; g.lineWidth = 2; g.setLineDash([4, 4]);
-    g.beginPath(); g.moveTo(P[4].x, P[4].y); g.lineTo(P[8].x, P[8].y); g.stroke(); g.setLineDash([]);
+    g.beginPath(); g.moveTo(P[4].x, P[4].y); g.lineTo(P[12].x, P[12].y); g.stroke(); g.setLineDash([]);
     g.strokeStyle = "rgba(255,255,255,0.25)"; g.lineWidth = 8;
     g.beginPath(); g.arc(cx, cy, R * 0.6, 0, 7); g.stroke();
-    g.strokeStyle = v.pinching ? "#2c9" : "rgba(255,255,255,0.85)";
+    g.strokeStyle = v.horns ? "#2c9" : "rgba(255,255,255,0.85)";
     g.beginPath(); g.arc(cx, cy, R * 0.6, -Math.PI / 2, -Math.PI / 2 + fill * 2 * Math.PI); g.stroke();
   } else {
     // Twist dial: 0° at top; dead zone grey; speed bands brighter outward; needle = current twist.

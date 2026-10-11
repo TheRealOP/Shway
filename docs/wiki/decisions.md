@@ -12,6 +12,7 @@ Snapshot: October 10, 2026. Update these entries when evidence or user direction
 | Hosted multimodal reasoning | Planned | Shortest initial path; provider and model still open |
 | Bounded profile adaptation | Planned | Explicit, testable personalization without autonomous rewrites |
 | Full Harness² / learned recognizer / phone / EMG | Deferred | Beyond the first complete workflow |
+| TRIBE analysis | Tabled for the hackathon (October 11, 2026) | Inference (about 5 min per 12 s clip on GPU) is too slow for the time left; DEV-96/97/109/118/119/120/121 moved to Backlog. The demo ships without it |
 | YAGNI | Selected | User requested minimal implementation guidance |
 | Ponytail skill | Unresolved, optional | Exact skill reference not available; use YAGNI |
 

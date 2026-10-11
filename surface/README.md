@@ -29,7 +29,7 @@ fixtures (`web-test.mp4` …) come from the editor dist; never commit them.
 The camera is off until you press **Turn camera on** in the Hands section. Everything else (mouse,
 keys, push-to-talk, typed corrections, first cut, TRIBE suggestions) works without it. Turning it off
 stops the camera and is handled like tracking loss first: a shuttle stops where it is, and a
-pinch-started recording is cancelled. Then the hand state returns to Idle. A refused or missing camera leaves the toggle off with a note.
+🤘-started recording is cancelled. Then the hand state returns to Idle. A refused or missing camera leaves the toggle off with a note.
 
 The editor keeps the keyboard while it has focus: Space, J/K/L, Cmd+Z, and the other editor keys work as usual.
 Click the panel to give it the keyboard. The header shows `Keys → editor` or `Keys → panel`.
@@ -38,12 +38,12 @@ Typing in a panel field never triggers shortcuts. Esc works everywhere in the pa
 | Panel key | Gesture | Effect |
 | --- | --- | --- |
 | `A` | double tap, only while a preview is pending | Accept: `adapter.commit` (one undo step) |
-| `X` | still pinch held 0.8 s, only while a preview is pending | Reject: `adapter.cancel`, then talk to say why |
+| `X` | still 🤘 held 0.8 s, only while a preview is pending | Reject: `adapter.cancel`, then talk to say why |
 | `U` | — | Undo: `adapter.undo` |
-| hold `V` / hold button | still pinch held 0.8 s (no twist) | Push-to-talk. Release ends it. Twisting or losing the hand cancels. |
-| hold `Space`, `Shift` | pinch, `Shift` | Engage / fine mode (twist needs a hand) |
+| hold `V` / hold button | still 🤘 held 0.8 s (no twist) | Push-to-talk. Release ends it. Twisting or losing the hand cancels. |
+| hold `Space`, `Shift` | 🤘, `Shift` | Engage / fine mode (twist needs a hand) |
 | `Esc` | — | Cancel the recording or the scrub (playhead returns) |
-| — | pinch + twist / swipe / chop / double tap | Shuttle / next or previous edit / cut / play-pause (unchanged, see [gestures](gestures/README.md)) |
+| — | 🤘 + twist / fist, slid fist / swipe / chop / thumb–index double tap | Shuttle / pause, scrub / next or previous edit / cut / accept while a preview is pending (see [gestures](gestures/README.md)) |
 
 Chop and swipe never accept or reject. Double tap means accept only while the preview bar shows a
 proposal. The panel's `mode` line says so at that moment.
@@ -77,3 +77,7 @@ The panel loads these modules from the dist root. When a module is missing, it s
 ## Status and evidence
 
 See [acceptance](../docs/wiki/acceptance.md) for the dated status line.
+
+## Review remote (DEV-113)
+
+`review.html` + `review.mjs` (tests: `node --test surface/review.test.mjs`): camera/mic remote for reviewing in the desktop editor. Serve `python3 -m http.server -d surface 8771 --bind 127.0.0.1`, run `node shway/assistant.mjs`, open `http://127.0.0.1:8771/review.html`. Hold V / the button = stop + talk; release sends one note bound to the stopped moment; scrub (🤘 + twist, or a slid fist) to mark a range; fist = pause; point = laser dot and thumb–index double tap = draw, sent as `{pointer, strokes, drawing}` to `POST /ink` (≤ 30 Hz, latest wins); Esc clears the sketch, Esc / Resume cancels and plays on; transport gestures go to `/review/transport`, chop to `/review/cut` (DEV-114). Accept/reject in the editor chat panel; both resume playback. `window.shwayReview.{gesture, say}` drive it without camera/mic. Status: [acceptance](../docs/wiki/acceptance.md).

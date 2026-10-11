@@ -2,7 +2,7 @@
 <!-- Shway gesture camera harness (DEV-91). Serve this directory over http(s) on localhost:
      python3 -m http.server -d surface/gestures 8770 → http://127.0.0.1:8770/camera.html
      Loads MediaPipe Tasks Vision (Apache-2.0) and its hand model from public CDNs at runtime; nothing is vendored.
-     Space = engage (fallback for pinch) · Shift = fine mode · Esc = cancel · R = record trace -->
+     Space = engage (fallback for 🤘) · Shift = fine mode · Esc = cancel · R = record trace -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -45,8 +45,8 @@
       <dt>twist</dt><dd id="angle">–</dd>
       <dt>rate</dt><dd id="rate">0</dd>
       <dt>hand</dt><dd id="hand">–</dd>
-      <dt>thumb–index</dt><dd id="pinch">–</dd>
-      <dt>thumb–middle</dt><dd id="middle">–</dd>
+      <dt>🤘 thumb</dt><dd id="pinch">–</dd>
+      <dt>thumb–index tap</dt><dd id="middle">–</dd>
       <dt>chop travel</dt><dd id="chop">–</dd>
       <dt>feedback p95</dt><dd id="lat">–</dd>
       <dt>recording</dt><dd id="rec">off (R)</dd>
@@ -119,10 +119,10 @@ async function main() {
     $("angle").textContent = `${v.angleDeg.toFixed(1)}°`;
     $("rate").textContent = `${v.rate}×`;
     const fmt = (x) => (Number.isFinite(x) ? x.toFixed(2) : "–");
-    $("pinch").textContent = `${fmt(v.pinchRatio)} (pinch < ${C.pinchOn})`;
-    $("middle").textContent = `${fmt(v.middleRatio)} (tap < ${C.tapOn})${v.tapping ? " · closed" : ""}`;
+    $("pinch").textContent = `${fmt(v.hornsRatio)} (🤘 < ${C.hornsOn}) · ${v.pose ?? "–"}${v.drawing ? " · drawing" : ""}`;
+    $("middle").textContent = `${fmt(v.tapRatio)} (tap < ${C.tapOn})${v.tapping ? " · closed" : ""}`;
     $("chop").textContent = `${fmt(v.chopTravel)} / ${C.chopMinPalms} palms${v.blade ? " · blade" : ""}`;
-    $("hand").textContent = hand ? `${v.handedness} ${(v.confidence * 100).toFixed(0)}%${v.pinching ? " · pinch" : ""}` : "none";
+    $("hand").textContent = hand ? `${v.handedness} ${(v.confidence * 100).toFixed(0)}%${v.horns ? " · 🤘" : ""}` : "none";
     requestAnimationFrame(() => {
       lat.push(performance.now() - t0);
       if (lat.length > 300) lat.shift();

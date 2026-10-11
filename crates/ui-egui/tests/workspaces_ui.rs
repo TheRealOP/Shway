@@ -322,3 +322,50 @@ fn panel_toggles_focus_mode_and_full_screen_video() {
     assert!(!d.app().ui.video_fullscreen, "F leaves");
     let _ = std::fs::remove_dir_all(&data);
 }
+
+#[test]
+fn shway_layout_and_assistant_chat_toggle() {
+    let data = data_dir("chat-toggle");
+    let mut d = Driver::launch(&data);
+    assert_eq!(d.workspace(), "Shway");
+    // video on top, the Timeline under it and the Project bin beside the Timeline, all on show
+    for p in [PanelKind::Program, PanelKind::Timeline, PanelKind::Project, PanelKind::Assistant] {
+        assert!(d.shows(p), "{p:?} on show");
+    }
+    // [x, y, width, height]
+    let rect = |d: &mut Driver, id: &str| -> Vec<f64> {
+        let v = d.ok("ui.elements", json!({"prefix": id}));
+        let e = v.as_array().unwrap().iter().find(|e| e["id"] == json!(id)).cloned().unwrap_or_else(|| panic!("{id} registered"));
+        e["rect"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect()
+    };
+    let (program, timeline, project) = (rect(&mut d, "panel.Program"), rect(&mut d, "panel.Timeline"), rect(&mut d, "panel.Project"));
+    assert!(program[1] + program[3] <= timeline[1], "the Timeline is under the video: {program:?} {timeline:?}");
+    assert!(program[3] > timeline[3], "the video is the biggest: {program:?} {timeline:?}");
+    assert!(project[1] >= timeline[1] - 1.0 && project[0] < timeline[0], "the bin is beside the Timeline: {project:?} {timeline:?}");
+    d.snapshot("shway-default");
+    let before = d.app().ui.dock.clone();
+    // the header button hides the chat and brings it back
+    d.click("header.assistant");
+    assert!(!d.shows(PanelKind::Assistant) && !d.has("panel.Assistant"));
+    assert_eq!(d.ok("ui.inspect", json!({}))["assistant"], false);
+    let wide = rect(&mut d, "panel.Program");
+    assert!(wide[2] > program[2], "the video takes the chat's room: {wide:?} {program:?}");
+    d.snapshot("shway-chat-hidden");
+    d.click("header.assistant");
+    assert!(d.shows(PanelKind::Assistant));
+    assert_eq!(d.app().ui.dock, before, "the chat is back in its place");
+    // the command, the shortcut and ui.set do the same
+    assert_eq!(d.menu("view.assistant", json!({}))["assistant"], false);
+    assert_eq!(d.menu("view.assistant", json!({}))["assistant"], true);
+    d.ok("ui.key", json!({"key": "J", "command": true}));
+    d.frames(2);
+    assert!(!d.shows(PanelKind::Assistant), "Cmd+J hides the chat");
+    d.ok("ui.set", json!({"assistant": true}));
+    assert!(d.shows(PanelKind::Assistant));
+    assert_eq!(d.ok("ui.inspect", json!({}))["assistant"], true);
+    d.ok("ui.set", json!({"assistant": true}));
+    assert!(d.shows(PanelKind::Assistant), "setting the current value changes nothing");
+    d.ok("ui.set", json!({"assistant": false}));
+    assert!(!d.shows(PanelKind::Assistant));
+    let _ = std::fs::remove_dir_all(&data);
+}

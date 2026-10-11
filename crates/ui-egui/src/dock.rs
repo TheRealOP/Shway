@@ -159,6 +159,10 @@ fn tabs(p: &[PanelKind], active: usize) -> DockNode {
 fn hidden_tabs(p: &[PanelKind]) -> DockNode {
     DockNode::Tabs { panels: p.to_vec(), active: 0, hidden: p.to_vec() }
 }
+/// A group showing only its first panel; the rest are hidden until shown.
+fn first_shown(p: &[PanelKind]) -> DockNode {
+    DockNode::Tabs { panels: p.to_vec(), active: 0, hidden: p.get(1..).unwrap_or_default().to_vec() }
+}
 
 /// Focus mode keeps only the video and the Assistant chat on show.
 pub fn focus_keeps(p: PanelKind) -> bool {
@@ -182,7 +186,7 @@ fn vsplit(size: SplitSize, a: DockNode, b: DockNode) -> DockNode {
     DockNode::Split { vertical: true, size, a: Box::new(a), b: Box::new(b) }
 }
 
-/// The chat-first workspace new users start in (see [`WorkspacePrefs::shway_default`]).
+/// The video-first workspace new users start in (see [`WorkspacePrefs::shway_default`]).
 pub const SHWAY: &str = "Shway";
 
 pub const WORKSPACES: [&str; 11] =
@@ -264,23 +268,21 @@ pub fn workspace(name: &str) -> DockNode {
     use SplitSize::*;
     let bottom_editing = || hsplit(FixedA(64.0), tabs(&[Tools], 0), hsplit(FixedB(116.0), tabs(&[Timeline], 0), tabs(&[AudioMeters], 0)));
     match name {
-        // Chat-first: the Assistant on the left, the Program video on the right over a slim
-        // Timeline. Every other panel is in its usual place but hidden (View ▸ Panels shows it).
-        "Shway" => hsplit(
-            Ratio(0.36),
-            tabs(&[Assistant], 0),
-            vsplit(
-                FixedB(220.0),
-                hsplit(
-                    FixedB(340.0),
-                    hsplit(Ratio(0.5), hidden_tabs(&[Source, EffectControls, AudioClipMixer, Metadata]), tabs(&[Program], 0)),
-                    hidden_tabs(&[Properties, EssentialGraphics, Text]),
-                ),
-                hsplit(
-                    Ratio(0.29),
-                    hidden_tabs(&[Project, MediaBrowser, Libraries, Info, Effects, Markers, History]),
-                    hsplit(FixedA(64.0), hidden_tabs(&[Tools]), hsplit(FixedB(116.0), tabs(&[Timeline], 0), hidden_tabs(&[AudioMeters]))),
-                ),
+        // Video-first: the Program monitor fills the top, the Assistant chat beside it (View ▸
+        // Assistant Chat hides it and the video takes its room); the Timeline runs underneath with
+        // the Project bin as a narrow column on its left. Every other panel is in its usual place
+        // but hidden (View ▸ Panels shows it).
+        "Shway" => vsplit(
+            FixedB(300.0),
+            hsplit(
+                FixedB(340.0),
+                hsplit(Ratio(0.5), hidden_tabs(&[Source, EffectControls, AudioClipMixer, Metadata]), tabs(&[Program], 0)),
+                first_shown(&[Assistant, Properties, EssentialGraphics, Text]),
+            ),
+            hsplit(
+                FixedA(240.0),
+                first_shown(&[Project, MediaBrowser, Libraries, Info, Effects, Markers, History]),
+                hsplit(FixedA(64.0), hidden_tabs(&[Tools]), hsplit(FixedB(116.0), tabs(&[Timeline], 0), hidden_tabs(&[AudioMeters]))),
             ),
         ),
         "Assembly" => vsplit(
@@ -892,17 +894,26 @@ mod tests {
     }
 
     #[test]
-    fn shway_workspace_is_chat_first() {
+    fn shway_workspace_is_video_first() {
         let d = workspace(SHWAY);
-        for p in [PanelKind::Assistant, PanelKind::Program, PanelKind::Timeline] {
+        for p in [PanelKind::Assistant, PanelKind::Program, PanelKind::Timeline, PanelKind::Project] {
             assert!(d.is_visible(p) && !d.is_hidden(p), "{p:?} on show");
         }
-        for p in [PanelKind::Source, PanelKind::Project, PanelKind::EffectControls, PanelKind::MediaBrowser, PanelKind::AudioMeters, PanelKind::Tools] {
+        for p in [PanelKind::Source, PanelKind::EffectControls, PanelKind::MediaBrowser, PanelKind::AudioMeters, PanelKind::Tools, PanelKind::Properties] {
             assert!(d.contains(p) && d.is_hidden(p), "{p:?} tucked away");
         }
-        // the chat is the left column
-        let DockNode::Split { vertical: false, a, .. } = &d else { panic!("left/right split") };
-        assert_eq!(**a, tabs(&[PanelKind::Assistant], 0));
+        // the video (and chat) on top, the bin and Timeline in a band underneath
+        let DockNode::Split { vertical: true, size: SplitSize::FixedB(_), a, b } = &d else { panic!("top/bottom split") };
+        assert!(a.contains(PanelKind::Program) && a.contains(PanelKind::Assistant));
+        assert!(b.contains(PanelKind::Timeline) && b.contains(PanelKind::Project));
+        // hiding the chat leaves the video the whole top row; showing it puts it back
+        let mut hidden = d.clone();
+        assert!(hidden.hide(PanelKind::Assistant));
+        let DockNode::Split { a: top, .. } = &hidden else { panic!("top/bottom split") };
+        let DockNode::Split { b: chat, .. } = &**top else { panic!("video | chat") };
+        assert!(!chat.any_shown(false));
+        hidden.unhide(PanelKind::Assistant);
+        assert_eq!(hidden, d);
         assert_eq!(workspace("Pro"), workspace("Editing"));
     }
 

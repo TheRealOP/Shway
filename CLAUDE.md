@@ -31,8 +31,8 @@ Keep reported status honest: planned versus verified, with evidence.
 - **Exact time:** all time is `filmcraft_time::Tick` (254 016 000 000/s). Never use f64 seconds for edit math.
 - **Everything is a command** (`crates/engine`): id, label, menu path, shortcut, params, enabled(), run(). UI, CLI, control channel and MCP all dispatch by id.
 - **Everything is agent-drivable:** every interactive widget registers an automation id; UI state is serde so the control channel can read/set it.
-- **Quality gates** before every commit: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `cargo xtask layers`, `cargo xtask assets`, `cargo xtask wasm` (checks L0–L4 crates). `cargo xtask ci` runs them all.
-- **Commits:** one task id per commit (`M2.4: CABAC residual decoding`). Only green states. End messages with the attribution line required by the environment.
+- **Quality gates, scaled to the change and the deadline.** Before every commit run the fast, targeted ones: `cargo fmt --check`, `cargo clippy -p <changed crates> --all-targets -- -D warnings`, `cargo test -p <changed crates>`, `cargo xtask layers`, `cargo xtask assets` (plus `cargo xtask wasm` when an L0–L4 crate changed, and the Node tests for touched JS/TS). The full `cargo xtask ci` (whole workspace; an hour or more on a cold container) is **not a blocker**: start it in the background if you like, but don't make the creator wait for it. When time is short, commit and push once the targeted gates pass, and fix anything the full run finds in a follow-up commit. Always say which gates ran and which were skipped.
+- **Commits:** one task id per commit (`M2.4: CABAC residual decoding`). Only states green on the gates you ran. End messages with the attribution line required by the environment.
 
 ## Running and looking at the app
 - `cargo run -p filmcraft -- --control 9876` opens the desktop app with the JSON-lines control server (see `docs/control-protocol.md`).

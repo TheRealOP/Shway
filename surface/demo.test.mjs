@@ -3,22 +3,22 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHoldToTalk, readBrief, createProposals, loadHook, readTribeEvent, createTribeGate, clipAt, tribeCorrection } from "./demo.mjs";
 
-const armed = { state: "Armed", pinching: true };
-test("a still pinch talks after the hold; releasing finishes, twisting aborts", () => {
+const armed = { state: "Armed", horns: true };
+test("a still 🤘 talks after the hold; releasing finishes, twisting aborts", () => {
   const h = createHoldToTalk({ holdMs: 800 });
   assert.equal(h.step(0, armed), null);
   assert.equal(h.step(799, armed), null);
   assert.equal(h.step(800, armed), "talk");
   assert.equal(h.step(900, armed), null); // once
-  assert.equal(h.step(950, { state: "Idle", pinching: false }), "done");
+  assert.equal(h.step(950, { state: "Idle", horns: false }), "done");
   assert.equal(h.step(1000, armed), null); // a fresh hold restarts the clock
   assert.equal(h.step(1900, armed), "talk");
-  assert.equal(h.step(1950, { state: "Adjusting", pinching: true }), "abort");
-  // Space-held engagement (no pinch) and a short pinch never talk.
-  assert.equal(h.step(3000, { state: "Armed", pinching: false }), null);
-  assert.equal(h.step(9000, { state: "Armed", pinching: false }), null);
+  assert.equal(h.step(1950, { state: "Adjusting", horns: true }), "abort");
+  // Space-held engagement (no 🤘) and a short 🤘 never talk.
+  assert.equal(h.step(3000, { state: "Armed", horns: false }), null);
+  assert.equal(h.step(9000, { state: "Armed", horns: false }), null);
   assert.equal(h.step(9100, armed), null);
-  assert.equal(h.step(9200, { state: "Idle", pinching: false }), null);
+  assert.equal(h.step(9200, { state: "Idle", horns: false }), null);
 });
 
 test("brief needs message, audience, feeling, a sane duration and a script", () => {
