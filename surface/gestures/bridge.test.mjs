@@ -121,11 +121,13 @@ test("ink: pinch strokes from pointer events; undo drops the last stroke; 🤘 s
   const ev = (type, extra = {}) => ink.event({ type, t: 0, ...extra });
   ev("pointer", { x: 0.1, y: 0.1 });
   ev("pen-down"); ev("pointer", { x: 0.2, y: 0.2 });
+  assert.deepEqual(ink.state().strokes, [], "under 3 points is pinch flicker, not ink");
+  ev("pointer", { x: 0.3, y: 0.3 });
   assert.equal(ink.state().drawing, true, "ring while pinched");
   ev("pen-up");
   ev("pointer", { x: 0.5, y: 0.5 }); // pen up: moves the dot only
-  ev("pen-down"); ev("pointer", { x: 0.6, y: 0.6 }); ev("pen-up");
-  assert.deepEqual(ink.state(), { pointer: [0.6, 0.6], strokes: [[[0.1, 0.1], [0.2, 0.2]], [[0.5, 0.5], [0.6, 0.6]]], drawing: false, scrub: false });
+  ev("pen-down"); ev("pointer", { x: 0.6, y: 0.6 }); ev("pointer", { x: 0.7, y: 0.7 }); ev("pen-up");
+  assert.deepEqual(ink.state(), { pointer: [0.7, 0.7], strokes: [[[0.1, 0.1], [0.2, 0.2], [0.3, 0.3]], [[0.5, 0.5], [0.6, 0.6], [0.7, 0.7]]], drawing: false, scrub: false });
   assert.equal(ink.undo(), true);
   assert.equal(ink.state().strokes.length, 1, "undo drops the last stroke");
   assert.equal(ink.undo(), true);

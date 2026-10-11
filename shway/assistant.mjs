@@ -256,8 +256,8 @@ export function createAssistant({ editor = "127.0.0.1:9876", proxy = "http://127
     const ink = sketch?.state();
     if (ink && !ink.drawing && ink.strokes.length) {
       const seen = await readSketch(ink);
-      if (seen.figure === "unknown") return `I see ${seen.description}, but that isn't a sketch I know (split, arrow or circle). Nothing changed.`;
-      figure = FIGURES[seen.figure];
+      // An unknown figure (stray marks, a scribble) doesn't block the message: it's handled as plain chat.
+      if (seen.figure !== "unknown") figure = FIGURES[seen.figure];
     }
     const act = await interpret(message, snap, figure);
     const name = (id) => cut(String(snap.clips.get(id)?.name || `clip ${id}`), 40);

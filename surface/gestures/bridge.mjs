@@ -77,6 +77,7 @@ export function createBridge(adapter, { onError } = {}) {
 }
 
 const MAX_STROKES = 20, MAX_POINTS = 500; // the editor's caps (state::Ink)
+const MIN_STROKE = 3;
 
 /** The sketch on the Program monitor, built from recognizer ink events: {pointer, strokes, drawing}, 0–1 frame coords. */
 export function createInk() {
@@ -111,6 +112,7 @@ export function createInk() {
     clear,
     /** The undo wave: drops the last stroke; false when there is none (then undo the last edit). */
     undo: () => strokes.pop() !== undefined,
-    state: () => ({ pointer, strokes: strokes.filter((s) => s.length), drawing, scrub }),
+    // Strokes under MIN_STROKE points are pinch flicker (a pinch that opened and closed in a frame or two), not ink.
+    state: () => ({ pointer, strokes: strokes.filter((s) => s.length >= MIN_STROKE), drawing, scrub }),
   };
 }

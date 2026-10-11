@@ -460,16 +460,15 @@ test("sketch: an arrow maps to push with its direction (one step when the clip a
   assert.equal(s.editor.previews[1].steps[0].params.effect, "iris_round");
 });
 
-test("sketch: an unknown figure is described and nothing changes; the ink stays for a redraw", async (t) => {
+test("sketch: an unknown figure (stray marks) doesn't block the message: it's handled as plain chat", async (t) => {
   const s = await setup(); t.after(s.close);
   s.draw(SKETCH);
-  s.proxy.answers.push(seen("unknown", "a smiley face"));
-  const r = await s.call("/chat", { message: "do this" });
-  assert.equal(r.body.reply, "I see a smiley face, but that isn't a sketch I know (split, arrow or circle). Nothing changed.");
-  assert.equal(r.body.pending, null);
-  assert.equal(s.proxy.prompts.length, 1);
+  s.proxy.answers.push(seen("unknown", "two isolated dots"), { action: "answer", reply: "Sure, which clip?" });
+  const r = await s.call("/chat", { message: "add more padding to the intro" });
+  assert.equal(r.body.reply, "Sure, which clip?");
+  assert.doesNotMatch(s.proxy.prompts[1].system, /transition:/, "no transition offered for an unknown figure");
   assert.equal(s.editor.previews.length, 0);
-  assert.deepEqual([s.sketch.cur, s.editor.ink], [SKETCH, []], "the sketch stays for a redraw");
+  assert.deepEqual(s.sketch.cur, SKETCH, "the marks stay until undone or a decision");
   // A figure outside the enum is not trusted either.
   s.proxy.answers.push({ figure: "star", description: "x" });
   assert.match((await s.call("/chat", { message: "do this" })).body.reply, /no known figure/);
