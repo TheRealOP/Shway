@@ -1,7 +1,7 @@
 // Take replacement from a spoken correction, with fake model and adapter. Run: node --test shway/*.test.ts
 import test from "node:test";
 import assert from "node:assert/strict";
-import {proposeReplacement} from "./replace.ts";
+import {prepareReplacement, proposeReplacement, stageReplacement} from "./replace.ts";
 import type {ReplacementInput} from "./replace.ts";
 import {AdapterError} from "./adapter.ts";
 import type {EditProposal, SequenceInspection} from "./adapter.ts";
@@ -166,4 +166,51 @@ test("a preview staging another item or range is cancelled", async () => {
     assert.equal(r.status, "rejected", JSON.stringify(patch));
     assert.deepEqual(f.calls, ["inspect", "generate", "preview", "cancel"]);
   }
+});
+
+test("decider contract: grounded candidates without a model call; only offered ids stage", async () => {
+  const f = fixture();
+  const p = await prepareReplacement(f.input());
+  assert.equal(p.status, "candidates");
+  if (p.status !== "candidates") return;
+  assert.deepEqual(p.candidates.map(c => [c.id, c.words, c.current]), [
+    ["take-0", "Welcome to the workshop.", true], ["take-1", "Welcome to the [laughs] workshop.", false], ["take-2", "Welcome to our workshop.", false]]);
+  assert.deepEqual(f.calls, ["inspect"]);
+  const {adapter} = f.input();
+  for (const choice of ["review", "no-change", "take-0", "take-9", "take-1 ", ""]) {
+    assert.equal((await stageReplacement(p, choice, "", adapter)).status, "rejected", choice);
+  }
+  assert.deepEqual(f.calls, ["inspect"]);
+  const r = await stageReplacement(p, "take-1", "Jev picked the laugh.", adapter);
+  assert.equal(r.status, "preview");
+  assert.deepEqual(f.calls, ["inspect", "preview"]);
+  assert.equal(f.proposal()?.expectedRevision, 4); // bound to the push-to-talk snapshot
+});
+
+test("jevDecide sends named choices without ids or times; low confidence becomes review", async () => {
+  const {jevDecide} = await import("./replace.ts");
+  const sent: any[] = [];
+  let answer: any = {type: "choice", choice: "take-1", confidence: 0.97, probabilities: {}};
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url: string, init: {body: string}) => {
+    sent.push(JSON.parse(init.body));
+    return {ok: true, status: 200, json: async () => ({model: "jev-1.13.0", answers: {take: answer}})};
+  }) as never;
+  try {
+    const f = fixture();
+    const r = await proposeReplacement({...f.input(), generate: undefined, decide: jevDecide("http://proxy")});
+    assert.equal(r.status, "preview");
+    if (r.status === "preview") assert.equal(r.take, TAKES[1]);
+    assert.match(r.status === "preview" ? r.explanation : "", /Jev \(jev-1\.13\.0, confidence 0\.97\) chose/);
+    const q = sent[0];
+    assert.deepEqual(Object.keys(q.questions.take.criteria), ["take-1", "take-2", "no-change", "review"]); // current take not offered
+    assert.equal(q.state.current_take, "Welcome to the workshop.");
+    assert.doesNotMatch(JSON.stringify(q), /31|32|sourceIn/);
+    for (const [a, status] of [[{...answer, confidence: 0.4}, "rejected"], [{...answer, choice: "take-0"}, "rejected"], [{...answer, choice: "made-up"}, "rejected"], [{...answer, choice: "review"}, "rejected"]] as const) {
+      answer = a;
+      const g = fixture();
+      assert.equal((await proposeReplacement({...g.input(), generate: undefined, decide: jevDecide("http://proxy")})).status, status);
+      assert.ok(!g.calls.includes("preview"), JSON.stringify(a));
+    }
+  } finally {globalThis.fetch = realFetch;}
 });

@@ -44,6 +44,33 @@ enum Step {
     Replace(Replace),
     #[serde(rename = "timeline.place")]
     Place(Place),
+    #[serde(rename = "timeline.remove")]
+    Remove(Remove),
+    #[serde(rename = "timeline.move")]
+    Move(Move),
+}
+
+/// Ripple-delete explicit clips (with their linked partners); later material closes the gap.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Remove {
+    clips: Vec<u64>,
+}
+
+/// Rearrange: `clip` (with its links) plays immediately before/after `anchor` on the same track.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Move {
+    clip: u64,
+    anchor: u64,
+    position: Position,
+}
+
+#[derive(Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum Position {
+    Before,
+    After,
 }
 
 #[derive(Deserialize)]
@@ -358,7 +385,85 @@ fn apply(s: &mut Session, step: Step) -> Result<Value> {
             }
             Ok(json!({"placed":placed}))
         }
+        Step::Remove(p) => {
+            let clips = targets(s, &p.clips)?;
+            let before = s.active_sequence().ok_or(EngineError::NoSequence)?.duration();
+            // The engine's own Ripple Delete: partners, sync locks and markers as the user knows it.
+            s.execute("edit.rippleDelete", json!({"clips":p.clips}))?;
+            let q = s.active_sequence().ok_or(EngineError::NoSequence)?;
+            if clips.iter().any(|c| q.find_item(*c).is_some()) {
+                return Err(bad("ripple delete did not remove every linked target"));
+            }
+            let closed = before.0.checked_sub(q.duration().0).ok_or_else(|| bad("sequence duration overflow"))?;
+            Ok(json!({"removed":clips.iter().map(|c| c.0).collect::<Vec<_>>(),"closed":closed}))
+        }
+        Step::Move(p) => rearrange(s, &p),
     }
+}
+
+/// Insert-move the clip to the anchor's edge (`timeline.move`), then close the hole it left
+/// (`sequence.closeGap`). The result is checked against the exact rearrangement, so a sync-lock
+/// conflict, a pre-existing gap or an unsynced partner becomes an error, never a desync.
+fn rearrange(s: &mut Session, p: &Move) -> Result<Value> {
+    if p.clip == p.anchor {
+        return Err(bad("clip and anchor must differ"));
+    }
+    let moved = targets(s, &[p.clip])?;
+    if targets(s, &[p.anchor])?.iter().any(|c| moved.contains(c)) {
+        return Err(bad("anchor is linked to the moved clip"));
+    }
+    let q = s.active_sequence().ok_or(EngineError::NoSequence)?;
+    let (track, clip) = q.find_item(ClipId(p.clip)).ok_or_else(|| bad("missing clip"))?;
+    let (anchor_track, anchor) = q.find_item(ClipId(p.anchor)).ok_or_else(|| bad("missing anchor"))?;
+    if track != anchor_track {
+        return Err(bad("anchor must be on the moved clip's track"));
+    }
+    let (start, end, d) = (clip.start.0, clip.end().0, clip.duration.0);
+    let at = if p.position == Position::Before { anchor.start.0 } else { anchor.end().0 };
+    if at == start || at == end {
+        return Err(bad("clip already plays there"));
+    }
+    // Exact expectation: material between the old and new place shifts by the clip's length on
+    // the moved clips' tracks and on every unlocked sync-locked track; nothing else changes.
+    let later = at > start;
+    let overflow = || bad("move range overflow");
+    let (new_start, gap) = if later { (at.checked_sub(d).ok_or_else(overflow)?, start) } else { (at, end) };
+    let mut expected = Vec::new();
+    for t in q.all_tracks() {
+        let rippled = !t.locked && (t.sync_lock || t.items.iter().any(|i| moved.contains(&i.id)));
+        for i in &t.items {
+            let x = i.start.0;
+            let shift = if moved.contains(&i.id) {
+                new_start.checked_sub(x).ok_or_else(overflow)?
+            } else if rippled && later && x >= end && x < at {
+                -d
+            } else if rippled && !later && x >= at && x < start {
+                d
+            } else {
+                0
+            };
+            expected.push((i.id, t.id, x.checked_add(shift).ok_or_else(overflow)?));
+        }
+    }
+    // A rearrangement keeps the sequence length, so sequence markers stay where they are.
+    let markers = std::mem::replace(&mut s.state.ripple_sequence_markers, false);
+    let result = s.execute("timeline.move", json!({"moves":[{"clip":p.clip,"track":track.0,"time":at}],"insert":true,"linked":true})).and_then(|_| {
+        // Moving earlier pushes the hole right by the clip's own length: it now starts at `end`.
+        // A hole at the very end of the track is no gap: nothing follows it.
+        let tail = s.active_sequence().and_then(|q| q.track(track)).is_none_or(|t| t.items.iter().all(|i| i.start.0 < gap));
+        if tail { Ok(Value::Null) } else { s.execute("sequence.closeGap", json!({"track":track.0,"time":gap})) }
+    });
+    s.state.ripple_sequence_markers = markers;
+    result?;
+    let q = s.active_sequence().ok_or(EngineError::NoSequence)?;
+    let actual: Vec<_> = q.all_tracks().flat_map(|t| t.items.iter().map(move |i| (i.id, t.id, i.start.0))).collect();
+    if actual.len() != expected.len() || expected.iter().any(|e| !actual.contains(e)) {
+        return Err(bad("move cannot ripple every affected track identically (sync lock, gap or partner); re-plan"));
+    }
+    for c in &moved {
+        check_clip(s, *c)?;
+    }
+    Ok(json!({"moved":moved.iter().map(|c| c.0).collect::<Vec<_>>(),"start":new_start}))
 }
 
 fn prepared(s: &Session, token: u64) -> Result<&Prepared> {
@@ -392,7 +497,8 @@ pub fn preview(s: &mut Session, v: &Value) -> Result<Value> {
     for step in steps {
         let params = step.get("params");
         let list = params.and_then(|p| p.get("clips").or_else(|| p.get("ranges")));
-        let count = list.and_then(Value::as_array).map_or(1, Vec::len);
+        // A move references both its clip and its anchor.
+        let count = list.and_then(Value::as_array).map_or(1, Vec::len) + usize::from(params.is_some_and(|p| p.get("anchor").is_some()));
         target_count = target_count.checked_add(count).ok_or_else(|| bad("target count overflow"))?;
         if target_count > MAX_TARGETS {
             return Err(bad("at most 32 explicit target references across the proposal"));

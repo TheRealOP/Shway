@@ -106,7 +106,7 @@ impl Driver {
     }
 
     fn shows(&mut self, p: PanelKind) -> bool {
-        self.app().ui.dock.contains(p)
+        self.app().ui.dock.contains(p) && !self.app().ui.dock.is_hidden(p)
     }
 
     /// Window ▸ Workspaces as (label, checked) in menu order.
@@ -149,6 +149,11 @@ fn saved_file(data: &Path) -> Value {
 fn save_switch_reset_rename_delete_and_restart() {
     let data = data_dir("cycle");
     let mut d = Driver::launch(&data);
+    // the first launch opens the chat-first Shway workspace, once; Pro and Editing stay a click away
+    assert_eq!(d.workspace(), "Shway");
+    assert!(d.shows(PanelKind::Assistant) && d.shows(PanelKind::Program) && !d.shows(PanelKind::Metadata));
+    assert_eq!(saved_file(&data)["shwayDefault"], true);
+    d.menu("window.workspace.editing", json!({}));
     assert_eq!(d.workspace(), "Editing");
     assert!(d.shows(PanelKind::Metadata));
 
@@ -171,7 +176,9 @@ fn save_switch_reset_rename_delete_and_restart() {
             "Editing",
             "Effects",
             "Learning",
+            "Pro",
             "Review",
+            "Shway",
             "Reset to Saved Layout",
             "Save Changes to this Workspace",
             "Save as New Workspace…",
@@ -276,5 +283,42 @@ fn save_rename_and_delete_through_the_dialogs() {
     d.frames(4); // the window shrinks to the shorter list
     d.click("workspaces.edit.close");
     assert!(d.app().ui.workspace_dialog.is_none(), "Close closes the dialog");
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+#[test]
+fn panel_toggles_focus_mode_and_full_screen_video() {
+    let data = data_dir("shway");
+    let mut d = Driver::launch(&data);
+    assert_eq!(d.workspace(), "Shway");
+    // View ▸ Panels: hiding keeps the panel's place; showing it again puts it back
+    let before = d.app().ui.dock.clone();
+    assert_eq!(d.menu("view.panel.Timeline", json!({}))["shown"], false);
+    assert!(!d.shows(PanelKind::Timeline) && d.app().ui.dock.contains(PanelKind::Timeline));
+    assert_eq!(d.menu("view.panel.Timeline", json!({}))["shown"], true);
+    assert_eq!(d.app().ui.dock, before, "the layout is back as it was");
+    assert_eq!(d.menu("view.panel.Source", json!({}))["shown"], true, "a tucked-away panel shows in its place");
+    assert!(d.shows(PanelKind::Source));
+    // Focus mode leaves only the video and the chat; toggling it back restores the rest
+    d.menu("view.focusMode", json!({}));
+    d.frames(2);
+    assert!(d.has("panel.Program") && d.has("panel.Assistant") && !d.has("panel.Timeline") && !d.has("panel.Source"));
+    d.menu("view.focusMode", json!({}));
+    d.frames(2);
+    assert!(d.has("panel.Timeline") && d.has("panel.Source"));
+    // Full-Screen Video: the Program monitor alone; Esc leaves, F (in the Program monitor) toggles
+    d.menu("view.videoFullscreen", json!({}));
+    d.frames(2);
+    assert!(d.app().ui.video_fullscreen && d.has("panel.Program") && !d.has("panel.Assistant") && !d.has("header.home"));
+    d.ok("ui.key", json!({"key": "Escape"}));
+    d.frames(2);
+    assert!(!d.app().ui.video_fullscreen && d.has("panel.Assistant"));
+    d.app().ui.focused = PanelKind::Program;
+    d.ok("ui.key", json!({"key": "F"}));
+    d.frames(2);
+    assert!(d.app().ui.video_fullscreen, "F in the Program monitor enters");
+    d.ok("ui.key", json!({"key": "F"}));
+    d.frames(2);
+    assert!(!d.app().ui.video_fullscreen, "F leaves");
     let _ = std::fs::remove_dir_all(&data);
 }

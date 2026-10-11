@@ -1,7 +1,7 @@
-//! The header bar (Premiere 26 layout, 38 pt): Home and Import / Edit / Export on the left, the
-//! document title centred, the workspace name and quick actions on the right. On macOS the menus
-//! live in the native menu bar (set up by the app); elsewhere a compact in-window menu bar follows
-//! the mode tabs.
+//! The header bar (38 pt): Home, the Shway wordmark and Import / Edit / Export on the left, the
+//! document title centred, the workspace name and quick actions (full screen, focus mode, the
+//! Assistant chat…) on the right. On macOS the menus live in the native menu bar (set up by the
+//! app); elsewhere a compact in-window menu bar follows the mode tabs.
 
 use egui::{Color32, Rect, Sense, Stroke, pos2, vec2};
 
@@ -35,7 +35,11 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     if hresp.clicked() {
         app.ui.mode = Mode::Import;
     }
-    x = home.max.x + 16.0;
+    x = home.max.x + 12.0;
+    if let Some(r) = crate::brand::paint_wordmark(ui, pos2(x, rect.center().y), 14.0, app.ui.dark) {
+        app.auto.add("header.brand", r, crate::brand::NAME);
+        x = r.max.x + 20.0;
+    }
     // Mode tabs (14 pt; active = primary text with a 2 pt underline under the label)
     for (m, label, shown) in [(Mode::Import, "Import", tl!("Import")), (Mode::Edit, "Edit", tl!("Edit")), (Mode::Export, "Export", tl!("Export"))] {
         let active = app.ui.mode == m;
@@ -80,9 +84,18 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         icons::paint(ui.painter(), r.shrink(6.0), icon, if resp.hovered() { t.text } else { t.text_dim });
         resp
     };
+    let ctx = ui.ctx().clone();
+    let run = |app: &mut FilmcraftApp, id: &str| {
+        if let Err(e) = crate::menus::invoke(app, &ctx, id, serde_json::json!({})) {
+            app.ui.status = e;
+        }
+    };
     if btn(ui, Icon::Fullscreen, "fullscreen", tl!("Full screen"), app).clicked() {
-        let fs = ui.ctx().input(|i| i.viewport().fullscreen.unwrap_or(false));
-        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
+        run(app, "view.windowFullscreen");
+    }
+    let focus_icon = if app.ui.focus_mode { Icon::EyeOff } else { Icon::Eye };
+    if btn(ui, focus_icon, "focusMode", tl!("Focus Mode"), app).clicked() {
+        run(app, "view.focusMode");
     }
     if btn(ui, Icon::Speaker, "volume", tl!("Volume"), app).clicked() {
         app.ui.status = tl!("Master volume: use the Audio Track Mixer").into();
@@ -94,7 +107,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         app.ui.mode = Mode::Export;
     }
     // Quick Export: a popup with File Name & Location, a preset list and Export (Premiere 26)
-    let qx = rect.max.x - 14.0 - 4.0 * 38.0; // the fifth button from the right
+    let qx = rect.max.x - 14.0 - 5.0 * 38.0; // the sixth button from the right
     if btn(ui, Icon::Export, "quickExport", tl!("Quick Export"), app).clicked() {
         app.ui.export.quick_open = !app.ui.export.quick_open;
         ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("quick-export-toggled"), true));
@@ -108,20 +121,12 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let wresp = ui.interact(wr, egui::Id::new("hdr-ws-name"), Sense::click());
     app.auto.add("header.workspaceName", wr, &ws);
     p.galley_with_override_text_color(pos2(wr.min.x + 4.0, rect.center().y - wg.size().y / 2.0), wg, if wresp.hovered() { t.text } else { t.text_dim });
-    // Community: a labelled Discord button, always one click away.
+    // Document title, centred in the room between the menus and the right cluster (localized
+    // menus and user titles can be wider than English: use the actual gap). Shway leaves the
+    // upstream community (Discord) button out of the header; Help ▸ keeps the links.
     {
-        let label = "Discord";
-        let g = p.layout_no_wrap(label.to_string(), Tokens::ui(12.0), Color32::WHITE);
-        let w = g.size().x + 34.0;
-        let r = Rect::from_min_size(pos2(wr.min.x - w - 14.0, rect.center().y - 12.0), vec2(w, 24.0));
-        let resp = ui.interact(r, egui::Id::new("hdr-discord"), Sense::click()).on_hover_text(tl!("Join the ArtCraft Discord (discord.gg/artcraft)"));
-        app.auto.add("header.discord", r, "Join the ArtCraft Discord");
-        ui.painter().rect_filled(r, 12.0, if resp.hovered() { t.accent_hover } else { t.accent });
-        icons::paint(ui.painter(), Rect::from_center_size(pos2(r.min.x + 14.0, r.center().y), vec2(14.0, 14.0)), Icon::Chat, Color32::WHITE);
-        ui.painter().galley(pos2(r.min.x + 25.0, r.center().y - g.size().y / 2.0), g, Color32::WHITE);
-        // Localized menus and user titles can be wider than English. Use the actual gap.
         let left = left_end + 12.0;
-        let right = r.min.x - 12.0;
+        let right = wr.min.x - 12.0;
         if right > left + 40.0 {
             let mut job = egui::text::LayoutJob::simple_singleline(title, Tokens::ui(14.0), t.tab_text_active);
             job.wrap.max_width = right - left;
@@ -134,10 +139,6 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 galley,
                 t.tab_text_active,
             );
-        }
-
-        if resp.clicked() {
-            crate::links::open(ui.ctx(), crate::links::DISCORD);
         }
     }
     let popup_id = egui::Id::new("workspaces-popup");

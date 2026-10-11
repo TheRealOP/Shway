@@ -95,7 +95,8 @@
 	Create Multi-Camera Source Sequence…	Crear secuencia de origen multicámara…
 	Create Proxies…	Crear proxies…
 	Cut	Cortar
-	Darkest	Más oscuro
+	Classic	Clásico
+	Shway	Shway
 	Delete Render Files	Eliminar archivos de procesamiento
 	Delete Render Files In to Out	Eliminar archivos de procesamiento de entrada a salida
 	Delete Tracks…	Eliminar pistas…
@@ -3480,3 +3481,26 @@
 	New Sequence	Nueva secuencia
 	Tracks	Pistas
 	tracks	pistas
+	Assistant	Asistente
+	The assistant is available in the desktop app.	El asistente está disponible en la aplicación de escritorio.
+	Ask for an edit…	Pide una edición…
+	PROPOSED EDIT	EDICIÓN PROPUESTA
+	The assistant isn't running	El asistente no está en marcha
+	Start it in a terminal, then send your message again:	Inícialo en una terminal y vuelve a enviar tu mensaje:
+	Edit by chatting	Edita conversando
+	Describe a change; you preview it before it lands.	Describe un cambio; lo previsualizas antes de aplicarlo.
+	Send	Enviar
+	Accept	Aceptar
+	Reject	Rechazar
+	Thinking…	Pensando…
+	You	Tú
+	Assistant service not running: start it with `node shway/assistant.mjs`	El servicio del asistente no está en marcha: inícialo con `node shway/assistant.mjs`
+	Send to Assistant	Enviar al asistente
+	Accept Assistant Edit	Aceptar la edición del asistente
+	Reject Assistant Edit	Rechazar la edición del asistente
+	Focus Mode	Modo concentración
+	Full Screen	Pantalla completa
+	Full-Screen Video	Vídeo a pantalla completa
+	Pro	Pro
+	Full-Screen Video (F)	Vídeo a pantalla completa (F)
+	Exit Full-Screen Video (F / Esc)	Salir del vídeo a pantalla completa (F / Esc)

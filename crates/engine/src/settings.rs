@@ -88,7 +88,7 @@ impl Default for GeneralPrefs {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AppearancePrefs {
-    /// "Color Theme": `darkest` (default) | `dark` | `light`.
+    /// "Color Theme": `shway` (default) | `darkest` (Classic) | `dark` | `light`.
     pub color_theme: String,
     /// "Accessible color contrast": brighter secondary text and borders.
     pub accessible_contrast: bool,
@@ -98,7 +98,7 @@ pub struct AppearancePrefs {
 
 impl Default for AppearancePrefs {
     fn default() -> Self {
-        Self { color_theme: "darkest".into(), accessible_contrast: false, highlight_color: DEFAULT_HIGHLIGHT.into() }
+        Self { color_theme: "shway".into(), accessible_contrast: false, highlight_color: DEFAULT_HIGHLIGHT.into() }
     }
 }
 
@@ -606,7 +606,7 @@ const STARTUP: &[(&str, &str)] = &[("showHome", "Show Home"), ("openMostRecent",
 const OPENING: &[(&str, &str)] = &[("showOpenDialog", "Show Open Dialog"), ("showHome", "Show Home")];
 const BIN_OPEN: &[(&str, &str)] = &[("openInPlace", "Open in place"), ("openNewTab", "Open new tab"), ("openNewWindow", "Open in new window")];
 const PROJECT_OPEN: &[(&str, &str)] = &[("openNewTab", "Open new tab"), ("openNewWindow", "Open in new window")];
-const THEMES: &[(&str, &str)] = &[("darkest", "Darkest"), ("dark", "Dark"), ("light", "Light")];
+const THEMES: &[(&str, &str)] = &[("shway", "Shway"), ("darkest", "Classic"), ("dark", "Dark"), ("light", "Light")];
 const MIXDOWN: &[(&str, &str)] = &[("front", "Front Only"), ("frontRear", "Front + Rear"), ("frontLfe", "Front + LFE"), ("frontRearLfe", "Front + Rear + LFE")];
 const AUDITION: &[(&str, &str)] = &[("scratch", "Scratch disk location for Captured Audio"), ("nextToMedia", "Next to original media files")];
 const BUFFERS: &[(&str, &str)] = &[("64", "64"), ("128", "128"), ("256", "256"), ("512", "512"), ("1024", "1024"), ("2048", "2048"), ("4096", "4096")];

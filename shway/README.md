@@ -23,7 +23,9 @@ Connection discovers command IDs and rejects engines that lack the proposal boun
 contains human-readable parameter descriptions; it is not itself a strict JSON schema. This adapter
 and Rust's typed deserializer validate the allowlisted proposal shape.
 
-The supported proposal steps are `timeline.trim`, `clip.replaceFromBin` and `timeline.place`. Proposals explicitly name
+The supported proposal steps are `timeline.trim`, `clip.replaceFromBin`, `timeline.place`,
+`timeline.remove` (`{clips}`: ripple delete with linked partners) and `timeline.move`
+(`{clip, anchor, position: "before"|"after"}`: rearrange on one track; counts as two references). Proposals explicitly name
 expected revision, active sequence, target clips, source IDs, and frame deltas. Requests are limited
 to 16 steps, 32 total explicit target references, and labels of at most 120 UTF-8 bytes. Rust stages them in a
 disposable session. `previewFrame` returns bounded RGBA pixels from that candidate without changing
@@ -148,7 +150,10 @@ node shway/gemini-server.mjs --port 8790      # reads GEMINI_API_KEY (optional G
   `audio/mp4` or `audio/wav`; a codec parameter such as `;codecs=opus` is allowed. `data` is base64.
   The route sends the audio inline to Gemini with an instruction to transcribe verbatim and returns
   `{model, usage, text}`. Request bodies may be up to 10 MB on this route only.
-- **`GET /health`:** returns `{ok, model}`.
+- **`GET /health`:** returns `{ok, model, jev}`.
+- **`POST /decide`:** with `JEV_KEY` in the `.env`, forwards `{state, questions, model?}` (1–8 questions;
+  the model must be `jev-*`, default pinned `jev-1.13.0`) to TypeSafe `POST /v1/systemone` with the key as a bearer
+  token. Returns `{model, answers, usage}`. Without a key it returns 503. Errors never contain either key.
 - **Default model:** `gemini-3.8-flash`. It calls `models/{model}:generateContent` with the key in the
   `x-goog-api-key` header.
 - **Safety:** only pages served from this machine (localhost, 127.0.0.1, [::1]) may call it.
@@ -201,6 +206,26 @@ else showMessage(r.message);  // "need-selection" | "no-take" | "rejected"
 Errors from `adapter.preview` are passed through unchanged for re-planning. These include a stale
 revision or interaction context (`AdapterError` code `stale`), a source too short for the take
 (`clip range must be positive and contained in its source`), missing handles, and sync locks.
+
+**Decider contract (DEV-104):** `prepareReplacement(input)` resolves the target and returns
+`{status: "candidates", correction, context, candidates: [{id, words, current, take}], …}` without any
+model call. `stageReplacement(prepared, choice, explanation, adapter)` stages only an offered `id`;
+`"no-change"`, `"review"`, the current take and any other string return `rejected` and stage nothing.
+Staging uses the snapshot revision, so a late decision fails as `stale`. `proposeReplacement` is
+prepare → Gemini → stage. For TypeSafe Jev, the candidates map to a `choice` question's `criteria`
+(`{"take-1": words, …, "no-change": …, "review": …}`). Give the model only ids and words; keep `take`
+(ids and times) on this side.
+
+**Jev decider:** `proposeReplacement({…, decide: jevDecide(proxy)})` asks TypeSafe Jev through the proxy's
+`POST /decide`. Jev sees the correction, the current take's words, and the other takes as named
+choices plus `no-change`/`review`. An answer below `minConfidence` (default 0.6) becomes `review`.
+The demo page uses Jev whenever `/health` reports `jev: true`, and Gemini otherwise.
+- **Verified 2026-10-10 (`jev-latest` → `jev-1.13.0`):** "our workshop" → take-2 (0.99), "less hesitant"
+  → the clean take (0.93), "fade to black" → review (0.96), each in about 0.2 s over the API.
+- **In the browser engine** (`foundation.mjs --creator --decider jev`, 2 runs): Jev chose "our workshop" at
+  0.97. The whole decision through to the preview took 252 / 288 ms (Gemini: 2.3–4.0 s). For the replayed TRIBE
+  event, Jev's confidence was 0.47 / 0.51, so the result was review and nothing changed.
+  All gates passed (21 chain + 15 foundation).
 
 Limitations: `project.inspect` does not expose source marks, so a replacement item with a source
 In mark stages a range other than the take. The staged-range check then cancels the preview. A
@@ -265,3 +290,115 @@ node --test shway/transcribe-local.test.mjs
   the model load. `parseTranscript` accepted the output. `indexTakes` found all three script lines
   at score 1.00. The built-in recogniser sets no confidence (every word gets 1), so do not rank takes on
   confidence. Real creator footage, noisy audio and clips over 30 s are not yet verified.
+
+## Long-form first cut from many clips (`longform.mjs`)
+
+`node shway/longform.mjs segments|plan|assemble|compare|test` (usage in the file header). Splits
+`transcribe-local.mjs` transcripts into word-exact segments at pauses, asks Gemini (local proxy,
+segment numbers + text + one-line clip descriptions, never times) for a hook/intro/body/ending
+playlist, validates it (numbers exist, no duplicates, 500–1600 spoken words; one retry quoting the
+error), widens ranges to whole frames with `alignRange`, and places them with `proposal.preview` →
+`proposal.commit`. The engine caps a proposal at 32 ranges, so a longer cut commits as several
+labelled proposals. Needs a CLI built from this tree (`proposal` `timeline.place` steps).
+
+## Chat assistant (`assistant.mjs`)
+
+A local service that lets the creator chat with the AI that edits their video in the desktop editor.
+It needs Node 23 or later, because it imports `adapter.ts` and `replace.ts`. It has no package dependencies.
+
+```sh
+filmcraft --control 9876 project.fcproj                 # the desktop editor
+node shway/gemini-server.mjs --port 8790                # holds the Gemini / Jev keys
+node shway/assistant.mjs --port 8793 --editor 127.0.0.1:9876 --proxy http://127.0.0.1:8790 [--takes takes.json]
+node --test shway/assistant.test.mjs                    # fake editor (TCP) + fake proxy
+```
+
+**Contract.** The service listens on loopback only and refuses non-local `Origin` headers. JSON bodies are at most 64 KB.
+
+| Route | Body | Returns |
+|---|---|---|
+| `GET /chat/state` | – | `{messages: [{role: "user"\|"assistant", text}], pending: null\|{token, label}, busy}` |
+| `POST /chat` | `{message}` (1–2000 chars) | `{reply, pending, busy}` |
+| `POST /chat/accept` | `{}` or empty | commits the pending preview (one undo step); same shape |
+| `POST /chat/reject` | `{}` or empty | cancels it; same shape |
+
+- **Errors:** a non-2xx status with `{error}`. While a request is running, POSTs return 409.
+  Accept or reject with nothing pending also returns 409. An unreachable editor or proxy returns 502.
+- **Memory:** the conversation is kept in memory only and capped at 200 messages.
+
+**How a message becomes an edit:**
+
+1. The service cancels any older pending preview, because the engine holds one at a time.
+2. It inspects the project: the active sequence's clips with their file names, start and duration in
+   seconds, selection, playhead and fps. Where the project has transcripts it adds the words from
+   `transcript.inspect`. The model gets this as JSON data, never as instructions. Linked audio is
+   folded into its video clip.
+3. Gemini (`POST {proxy}/generate` with a response schema) picks one action from the allowlist. Each
+   action has its own nested object, and every field in it is required: `answer`, `remove{clips}`,
+   `trim{clip, edge, direction, amount, unit}`, `move{clip, target, position}` and
+   `replace_take{correction}`.
+4. Validation rejects any other field, unknown clip ids, amounts that are not positive, trims past
+   the clip length or the media handles, and moves onto the same clip, its linked partner or another
+   track. An invalid answer gets one
+   retry that quotes the error. If that also fails, the creator gets a polite "couldn't" reply.
+5. Code maps the checked fields to engine params. The model never names commands, files or raw params.
+6. Edits go only through `proposal.preview` with `expectedRevision`. A trim is a ripple
+   `timeline.trim` of `round(seconds × fps)` frames. A remove is a `timeline.remove {clips}` step
+   (ripple delete; linked audio goes with its video). A move is a `timeline.move {clip, anchor:
+   target, position}` step (the clip plays right before/after the target; the rest ripples, length
+   unchanged). If the engine refuses a step (sync-locked music under the cut, a gap that would also
+   close, locked tracks), the creator gets its reason and nothing changes. `replace_take` calls `proposeReplacement` on
+   the selected clip with the `--takes` index. It uses Jev when the proxy reports `jev: true`, and
+   Gemini otherwise. Nothing commits until `/chat/accept`.
+7. A stale revision, at preview or at accept, cancels the preview and asks the creator to retry.
+
+**Not supported yet:**
+
+- **Moving several clips at once:** a move names one clip (with its links); "move the Chili's part"
+  where that part is two clips moves only the one the model picks.
+- **Restarts:** a pending preview is not cancelled when the service restarts. The engine then
+  refuses new previews until that token is cancelled or the app restarts.
+
+**Verified 2026-10-10 (live).** Setup:
+
+- A release `filmcraft --control 9878` ran on a copy of `longform-chrono.fcproj`: 53 linked clips at 59.94 fps.
+- The 20 word transcripts were imported first through `transcript.set`, giving 20 setup undo steps.
+- The run used a real Gemini proxy (`gemini-3.8-flash`) and `curl`-style requests.
+
+Results:
+
+| Message | Latency | Result |
+|---|---|---|
+| A question about the video | 4.5 s | Summarized the vlog and named the Chili's clips (104, 107) |
+| "remove the Chili's part" | 5.9 s | Unsupported reply; nothing changed |
+| "trim the end of the first clip by 1 second" | 3.9 s | Previewed a 60-frame ripple trim; history unchanged |
+| Reject | 0.00 s | Discarded; history unchanged |
+| The same trim again | 3.3 s | Previewed |
+| Accept | 0.08 s | Undo count 20 → 21 (`Trim end of C5500.MP4 (shorten 60 frames)`); sequence 37130 → 37070 frames |
+| Undo, then redo | – | Undo restored exactly 37130 frames; redo reapplied the trim |
+| "move the Chili's part to the very start" | 29.8 s | Gemini answered and asked which single clip to move; nothing changed |
+| "make the start of the second clip 10 frames tighter" | 3.2 s | Previewed and accepted as one step, after a `playhead.set` in between |
+| "use the take where I laugh" | 17.2 s | With no selection, asked the creator to select a clip |
+| Accept after the creator undid in the app | – | Stale: "didn't apply it"; nothing committed |
+| A request with an `https://evil.example` origin | – | 403 |
+
+Every Gemini answer in the run passed validation on the first try. An earlier flat schema failed:
+the model dropped or invented trim fields, which is why each action now has a nested object.
+The `replace_take` path with a real take index was not exercised live; its unit tests are in `replace.test.ts`.
+
+**Remove/move verified 2026-10-10 (live).** Same setup on a fresh copy: `filmcraft --control 9879`,
+proxy `:8799`, assistant `:8797`, 20 transcripts imported (undo 20). After load the sequence was
+37060 frames, 53 linked pairs, no gaps. The "Unsupported reply" and "asked which single clip" rows
+above predate the remove and move steps.
+
+| Message | Latency | Result |
+|---|---|---|
+| "remove the Chili's part" | 90.2 s | Gemini proxy timed out; 502, nothing changed |
+| The same again | 40.7 s | Previewed `Remove C5515.MP4, C5515.MP4`: clips 104, 107 and their audio 105, 108; `closed` 503 frames; history unchanged |
+| Accept | 0.01 s | Undo 20 → 21; 37060 → 36557 frames (−503); 51 V1/51 A1, all linked and aligned, no gaps |
+| Undo / redo / undo | – | Undo restored 37060 frames and 53 pairs; redo gave the same sequence byte-for-byte as the accept; undo again was identical to the first undo |
+| "move the Chili's part to the very start of the video" | 26.4 s | Previewed `Move C5515.MP4 before C5500.MP4` (clips 104 and 105 to 0) |
+| Reject | 0.01 s | Discarded; sequence identical to before; undo still 20 |
+| "move the second clip so it plays after the fourth clip" | 5.3 s | Previewed |
+| Accept | 0.02 s | Undo 20 → 21; V1 order 29, 32, 35, 38 → 29, 35, 38, 32; clip 41 onward unchanged; 37060 frames; linked, aligned, no gaps |
+| Undo | – | Sequence identical to before the move |

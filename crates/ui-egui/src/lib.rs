@@ -276,6 +276,8 @@ pub struct FilmcraftApp {
     pub shortcut_editor: panels::shortcuts_dialog::EditorState,
     pub toast: Option<(String, f64)>,
     pub tl: panels::timeline::TlState,
+    /// Assistant panel requests in flight (its conversation is `ui.assistant`).
+    pub assistant: panels::assistant::Client,
     /// Commands from outside the UI (native menu bar), invoked on the UI thread.
     pub command_inbox: Option<Receiver<String>>,
     /// GPU compositor (when running on wgpu): device state + compositor + the egui texture it feeds.
@@ -289,6 +291,8 @@ pub struct FilmcraftApp {
     pub workspaces: dock::WorkspacePrefs,
     /// Workspace names and the current one, as last handed to the native menu.
     menu_workspaces: (Vec<String>, String),
+    /// A text field had keyboard focus when the native menu was last updated.
+    menu_text_focus: bool,
 }
 
 pub struct GpuState {
@@ -461,6 +465,7 @@ impl FilmcraftApp {
             shortcut_editor: Default::default(),
             toast: None,
             tl: Default::default(),
+            assistant: Default::default(),
             command_inbox: None,
             gpu: None,
             watched_render: None,
@@ -468,6 +473,7 @@ impl FilmcraftApp {
             workspace_restored: false,
             workspaces,
             menu_workspaces: Default::default(),
+            menu_text_focus: false,
         }
     }
 
@@ -562,8 +568,18 @@ impl FilmcraftApp {
             }
         }
         if prev.is_none() && !self.workspace_restored {
-            // reopen the workspace in use when the app last closed
             self.workspace_restored = true;
+            if self.workspaces_path().is_some() && !self.workspaces.shway_default {
+                // Once, on the first launch of a Shway build: open the chat-first Shway
+                // workspace. After that the user's own choice is reopened.
+                let mut next = self.workspaces.clone();
+                next.shway_default = true;
+                next.current = dock::SHWAY.to_string();
+                if let Err(e) = self.set_workspaces(next) {
+                    self.ui.status = e;
+                }
+            }
+            // reopen the workspace in use when the app last closed
             if let Some(w) = dock::find(&self.workspaces, &self.workspaces.current) {
                 self.set_workspace(&w);
             }
@@ -651,15 +667,44 @@ impl FilmcraftApp {
         if name == "Color" {
             self.ui.show_scopes = false;
         }
+        self.ui.focus_mode = false;
+        if !self.ui.dock.is_visible(self.ui.focused) {
+            self.ui.focused = PanelKind::Program;
+        }
+    }
+
+    /// View ▸ Panels ▸ <panel>: hide a panel that is on show (it keeps its place), or show it
+    /// again where it was. Returns whether it is now shown.
+    pub fn toggle_panel(&mut self, p: PanelKind) -> bool {
+        if menus::panel_shown(self, p) {
+            self.ui.dock.hide(p);
+            if self.ui.focused == p {
+                self.ui.focused = PanelKind::Program;
+            }
+            false
+        } else {
+            self.show_panel(p);
+            true
+        }
     }
 
     pub fn show_panel(&mut self, p: PanelKind) {
+        // showing a panel brings it out of hiding (in its old place), out of focus mode and out
+        // of the full-screen video
+        self.ui.dock.unhide(p);
+        if self.ui.focus_mode && !dock::focus_keeps(p) {
+            self.ui.focus_mode = false;
+        }
+        if p != PanelKind::Program {
+            self.ui.video_fullscreen = false;
+        }
         if p == PanelKind::Timeline {
             self.ui.dock.restore_timeline();
         }
         if !self.ui.dock.contains(p) {
             let near = match p {
                 PanelKind::LumetriColor | PanelKind::EssentialGraphics | PanelKind::EssentialSound | PanelKind::Properties => PanelKind::Program,
+                PanelKind::Assistant => PanelKind::Properties,
                 PanelKind::Source
                 | PanelKind::EffectControls
                 | PanelKind::AudioClipMixer
@@ -1145,14 +1190,25 @@ impl FilmcraftApp {
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         let workspaces = (dock::names(&self.workspaces), self.ui.workspace.clone());
-        if self.bindings_rev != self.session.shortcuts.revision || workspaces != self.menu_workspaces {
+        // a focused text field, or selected label text (Cmd+C copies it)
+        let text_focus =
+            ctx.egui_wants_keyboard_input() || ctx.with_plugin(|s: &mut egui::text_selection::LabelSelectionState| s.has_selection()).unwrap_or(false);
+        if self.bindings_rev != self.session.shortcuts.revision || workspaces != self.menu_workspaces || text_focus != self.menu_text_focus {
             self.menu_workspaces = workspaces;
+            self.menu_text_focus = text_focus;
             self.bindings = menus::bindings(self);
             self.bindings_rev = self.session.shortcuts.revision;
-            let items = menus::menu_items(self);
+            let mut items = menus::menu_items(self);
+            if text_focus {
+                release_text_chords(&mut items);
+            }
             if let Some(hook) = self.hooks.shortcuts_changed.as_mut() {
                 hook(&items);
             }
+        }
+        // Esc leaves the full-screen video (F, its shortcut in the Program monitor, toggles it)
+        if self.ui.video_fullscreen && self.dialog.is_none() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            self.ui.video_fullscreen = false;
         }
         if ctx.egui_wants_keyboard_input() || self.dialog == Some(Dialog::Shortcuts) {
             return;
@@ -1354,6 +1410,10 @@ impl FilmcraftApp {
         let t = self.tokens;
         let full = ui.max_rect();
         ui.painter().rect_filled(full, 0.0, t.app_bg);
+        if self.ui.video_fullscreen && self.ui.mode == state::Mode::Edit {
+            self.fullscreen_video(ui, full);
+            return;
+        }
         let header_h = if self.ui.show_header { 38.0 } else { 0.0 };
         let header = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), header_h));
         if self.ui.show_header {
@@ -1478,16 +1538,31 @@ impl FilmcraftApp {
         .to_string()
     }
 
+    /// Full-Screen Video: the Program monitor alone fills the window, its controls showing while
+    /// the pointer moves (drawn by the monitor). Playback and scrub keys keep working; F or Esc
+    /// (or the monitor's exit button) leave.
+    fn fullscreen_video(&mut self, ui: &mut egui::Ui, full: egui::Rect) {
+        let ctx = ui.ctx().clone();
+        ui.painter().rect_filled(full, 0.0, egui::Color32::BLACK);
+        self.ui.focused = PanelKind::Program;
+        self.auto.add("panel.Program", full, "Program");
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(full).id_salt(("panel", PanelKind::Program.id())));
+        child.set_clip_rect(full);
+        panels::show(self, &mut child, PanelKind::Program, full);
+        panels::dialogs::show(self, &ctx);
+        self.watch_jobs(&ctx);
+    }
+
     fn dock_area(&mut self, ui: &mut egui::Ui, body: egui::Rect) {
         let t = self.tokens;
         // Maximize or Restore Frame (` / Shift+`): the maximized panel fills the dock area.
         let maximized = self.ui.keys.maximized.filter(|p| self.ui.dock.contains(*p));
         let mut dock = match maximized {
-            Some(p) => dock::DockNode::Tabs { panels: vec![p], active: 0 },
-            None => std::mem::replace(&mut self.ui.dock, dock::DockNode::Tabs { panels: vec![], active: 0 }),
+            Some(p) => dock::DockNode::single(p),
+            None => std::mem::replace(&mut self.ui.dock, dock::DockNode::single(PanelKind::Program)),
         };
         let mut groups = Vec::new();
-        dock::layout(ui, &mut dock, body, &t, "", &mut groups, &mut self.auto);
+        dock::layout(ui, &mut dock, body, &t, "", self.ui.focus_mode && maximized.is_none(), &mut groups, &mut self.auto);
         let mut actions = Vec::new();
         let seqs = dock::SeqTabs {
             open: self
@@ -1743,6 +1818,22 @@ pub fn playback_mix(session: &Session, seq_id: filmcraft_project::ItemId, sr: u3
     }
 }
 
+/// The chords a focused text field handles itself (clipboard, select all, undo / redo).
+const TEXT_CHORDS: [&str; 6] = ["Cmd+C", "Cmd+X", "Cmd+V", "Cmd+A", "Cmd+Z", "Cmd+Shift+Z"];
+
+/// On macOS the native menu bar's key equivalents take a key before the window sees it, so with
+/// Edit ▸ Paste on Cmd+V a focused text field never got its paste: Cmd+V ran `edit.paste` on the
+/// timeline instead. While a text field has keyboard focus the native menu gets these items
+/// without their text-editing chords, so the keys reach egui (which turns Cmd+V into a paste of
+/// the clipboard). Every other shortcut, and the menu items themselves, keep working.
+fn release_text_chords(items: &mut [menus::MenuItem]) {
+    for it in items {
+        if it.shortcut.as_deref().is_some_and(|s| TEXT_CHORDS.contains(&s)) {
+            it.shortcut = None;
+        }
+    }
+}
+
 /// The windowing layer (egui-winit, and egui's web backend) reports the clipboard shortcuts as
 /// `Event::Copy` / `Event::Cut` / `Event::Paste` instead of key presses: Ctrl+C/X/V on Windows and
 /// Linux, plus Ctrl+Insert, Shift+Insert and Shift+Delete on Windows. The shortcut bindings only
@@ -1775,6 +1866,21 @@ fn clipboard_events_as_keys(events: &mut Vec<egui::Event>, modifiers: egui::Modi
 #[cfg(test)]
 mod clipboard_key_tests {
     use egui::{Event, Key, Modifiers};
+
+    #[test]
+    fn a_focused_text_field_gets_its_editing_chords_back_from_the_native_menu() {
+        let session = filmcraft_engine::Session::default();
+        let mut items = crate::menus::menu_items_for(&session);
+        let shortcut = |items: &[crate::menus::MenuItem], id: &str| items.iter().find(|i| i.id == id).and_then(|i| i.shortcut.clone());
+        assert_eq!(shortcut(&items, "edit.paste").as_deref(), Some("Cmd+V"), "the native menu owns Cmd+V by default");
+        let save = shortcut(&items, "file.save");
+        assert!(save.is_some());
+        super::release_text_chords(&mut items);
+        for id in ["edit.paste", "edit.copy", "edit.cut", "edit.selectAll", "edit.undo", "edit.redo"] {
+            assert_eq!(shortcut(&items, id), None, "{id} must not take its chord from a text field");
+        }
+        assert_eq!(shortcut(&items, "file.save"), save, "other shortcuts stay");
+    }
 
     fn keys(events: Vec<Event>, m: Modifiers) -> Vec<(Key, Modifiers)> {
         let mut events = events;

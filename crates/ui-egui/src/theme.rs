@@ -1,7 +1,10 @@
 //! Design tokens. Every widget reads colours/sizes from [`Tokens`] so themes apply everywhere.
 //!
-//! The default theme follows the look of Premiere Pro's current dark UI (values measured from
-//! black-box screenshots, see `plan/premiere/02-ui-ux.md`); fonts are Inter + JetBrains Mono (OFL).
+//! The default theme is Shway's own "dark minimal" look: near-black surfaces, calm neutral greys,
+//! soft dividers, rounded corners and one mint accent used sparingly (selection, primary buttons,
+//! playhead, focus), so the video is the brightest thing on screen. The FilmCraft themes (measured
+//! from black-box screenshots, see `plan/premiere/02-ui-ux.md`) stay available as Classic, Medium
+//! and Light. Fonts are Inter + JetBrains Mono (OFL).
 
 use std::sync::Arc;
 
@@ -10,8 +13,10 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThemeKind {
-    /// Premiere-style darkest (default).
+    /// Shway dark minimal (default).
     #[default]
+    Shway,
+    /// FilmCraft's Premiere-style darkest ("Classic").
     Dark,
     /// Slightly lighter grey panels (Premiere's brightness slider mid position).
     Medium,
@@ -19,9 +24,10 @@ pub enum ThemeKind {
 }
 
 impl ThemeKind {
-    /// Settings ▸ Appearance ▸ Color Theme value (`darkest`, `dark`, `light`).
+    /// Settings ▸ Appearance ▸ Color Theme value (`shway`, `darkest`, `dark`, `light`).
     pub fn pref_name(self) -> &'static str {
         match self {
+            ThemeKind::Shway => "shway",
             ThemeKind::Dark => "darkest",
             ThemeKind::Medium => "dark",
             ThemeKind::Light => "light",
@@ -29,14 +35,16 @@ impl ThemeKind {
     }
     pub fn from_pref(s: &str) -> ThemeKind {
         match s {
+            "darkest" => ThemeKind::Dark,
             "dark" => ThemeKind::Medium,
             "light" => ThemeKind::Light,
-            _ => ThemeKind::Dark,
+            _ => ThemeKind::Shway,
         }
     }
     pub fn from_name(s: &str) -> Option<ThemeKind> {
         match s.to_ascii_lowercase().as_str() {
-            "dark" | "darkest" => Some(ThemeKind::Dark),
+            "shway" => Some(ThemeKind::Shway),
+            "dark" | "darkest" | "classic" => Some(ThemeKind::Dark),
             "medium" | "grey" | "gray" => Some(ThemeKind::Medium),
             "light" => Some(ThemeKind::Light),
             _ => None,
@@ -59,8 +67,12 @@ pub struct Tokens {
     pub tab_text_active: Color32,
     /// Blue focus rectangle around the active panel.
     pub focus: Color32,
+    /// Primary-button / progress fill (white text on it stays AA).
     pub accent: Color32,
     pub accent_hover: Color32,
+    /// Quiet accent tint: text-selection and selected-item backgrounds.
+    pub accent_muted: Color32,
+    /// Text primary / secondary / disabled.
     pub text: Color32,
     pub text_dim: Color32,
     pub text_faint: Color32,
@@ -70,8 +82,10 @@ pub struct Tokens {
     pub pressed: Color32,
     pub field_bg: Color32,
     pub field_border: Color32,
+    /// Divider between panels and sections.
     pub separator: Color32,
     pub row_alt: Color32,
+    /// Selected row / item (selection).
     pub row_selected: Color32,
     /// Scrubby (hot-text) numeric value colour.
     pub hot_text: Color32,
@@ -112,6 +126,7 @@ impl Tokens {
             focus: Color32::from_rgb(0x57, 0x94, 0xec),
             accent: Color32::from_rgb(0x2f, 0x6b, 0xdf),
             accent_hover: Color32::from_rgb(0x3f, 0x7c, 0xe8),
+            accent_muted: Color32::from_rgb(0x2f, 0x6b, 0xdf),
             text: Color32::from_rgb(0xd1, 0xd1, 0xd1),
             text_dim: Color32::from_rgb(0xb0, 0xb0, 0xb0),
             text_faint: Color32::from_rgb(0x6e, 0x6e, 0x6e),
@@ -147,6 +162,7 @@ impl Tokens {
             tab_h: 32.0,
         };
         match kind {
+            ThemeKind::Shway => Self::shway(),
             ThemeKind::Dark => dark,
             ThemeKind::Medium => Tokens {
                 app_bg: Color32::from_rgb(20, 20, 20),
@@ -193,14 +209,78 @@ impl Tokens {
         }
     }
 
+    /// Shway "dark minimal". Surfaces step up from near-black (app 0B0B0C, panel 141416, field
+    /// 1C1D20, hover 25262A); the accent is mint: as far from Premiere's blue (hue ~220°) as from
+    /// the danger red, so primary and destructive actions never read alike, and a bright mint
+    /// playhead stays visible over every clip label colour. Contrast is checked in the tests.
+    fn shway() -> Self {
+        const SURFACE_0: Color32 = Color32::from_rgb(0x0b, 0x0b, 0x0c);
+        const SURFACE_1: Color32 = Color32::from_rgb(0x14, 0x14, 0x16);
+        const SURFACE_2: Color32 = Color32::from_rgb(0x1c, 0x1d, 0x20);
+        const SURFACE_3: Color32 = Color32::from_rgb(0x25, 0x26, 0x2a);
+        const TEXT: Color32 = Color32::from_rgb(0xe8, 0xe8, 0xea);
+        const TEXT_2: Color32 = Color32::from_rgb(0xa3, 0xa3, 0xaa);
+        const DIVIDER: Color32 = Color32::from_rgb(0x22, 0x23, 0x26);
+        const MINT: Color32 = Color32::from_rgb(0x4f, 0xe0, 0xb5);
+        Tokens {
+            kind: ThemeKind::Shway,
+            app_bg: SURFACE_0,
+            header_bg: SURFACE_0,
+            panel_bg: SURFACE_1,
+            tab_bg: SURFACE_1,
+            tab_text: Color32::from_rgb(0x9a, 0x9a, 0xa1),
+            tab_text_active: TEXT,
+            focus: MINT,
+            accent: Color32::from_rgb(0x0f, 0x7d, 0x66),
+            accent_hover: Color32::from_rgb(0x11, 0x82, 0x70),
+            accent_muted: Color32::from_rgb(0x15, 0x39, 0x2f),
+            text: TEXT,
+            text_dim: TEXT_2,
+            text_faint: Color32::from_rgb(0x6e, 0x6e, 0x76),
+            icon: Color32::from_rgb(0x9a, 0x9a, 0xa1),
+            icon_active: TEXT,
+            hover: SURFACE_3,
+            pressed: Color32::from_rgb(0x2e, 0x30, 0x35),
+            field_bg: SURFACE_2,
+            field_border: Color32::from_rgb(0x2a, 0x2b, 0x30),
+            separator: DIVIDER,
+            row_alt: Color32::from_rgb(0x17, 0x17, 0x1a),
+            row_selected: Color32::from_rgb(0x15, 0x39, 0x2f),
+            hot_text: MINT,
+            tl_bg: Color32::from_rgb(0x10, 0x10, 0x12),
+            tl_track_bg: SURFACE_1,
+            tl_track_bg_alt: Color32::from_rgb(0x17, 0x17, 0x1a),
+            tl_header_bg: SURFACE_1,
+            tl_ruler_bg: Color32::from_rgb(0x10, 0x10, 0x12),
+            tl_ruler_tick: Color32::from_rgb(0x4a, 0x4b, 0x52),
+            tl_ruler_text: TEXT_2,
+            playhead: MINT,
+            in_out_shade: Color32::from_rgb(0x1f, 0x2e, 0x29),
+            clip_selected_border: MINT,
+            render_red: Color32::from_rgb(0xe5, 0x53, 0x4b),
+            render_yellow: Color32::from_rgb(0xe8, 0xc5, 0x4a),
+            render_green: Color32::from_rgb(0x3f, 0xa8, 0x7c),
+            monitor_bg: SURFACE_0,
+            timecode: MINT,
+            danger: Color32::from_rgb(0xf0, 0x60, 0x5a),
+            radius: 8.0,
+            radius_sm: 6.0,
+            gap: 4.0,
+            tab_h: 32.0,
+        }
+    }
+
     /// Settings ▸ Appearance on top of a theme: the highlight colour (selections, focus, primary
     /// buttons) and accessible colour contrast (brighter secondary text and borders).
     pub fn with_appearance(mut self, highlight: Option<[u8; 3]>, accessible_contrast: bool) -> Self {
-        if let Some([r, g, b]) = highlight {
+        // Shway keeps its mint unless the user picked a highlight other than the stock blue
+        let stock = filmcraft_engine::settings::parse_hex(filmcraft_engine::settings::DEFAULT_HIGHLIGHT);
+        if let Some([r, g, b]) = highlight.filter(|h| self.kind != ThemeKind::Shway || Some(*h) != stock) {
             let c = Color32::from_rgb(r, g, b);
             let lift = |v: u8| v.saturating_add(16);
             self.accent = c;
             self.accent_hover = Color32::from_rgb(lift(r), lift(g), lift(b));
+            self.accent_muted = if self.kind == ThemeKind::Shway { self.panel_bg.lerp_to_gamma(c, 0.3) } else { c };
         }
         if accessible_contrast {
             if self.kind == ThemeKind::Light {
@@ -305,13 +385,20 @@ pub fn apply_visuals(ctx: &egui::Context, t: &Tokens) {
     v.extreme_bg_color = t.field_bg;
     v.faint_bg_color = t.row_alt;
     v.override_text_color = Some(t.text);
-    v.selection.bg_fill = t.accent;
-    v.selection.stroke = Stroke::new(1.0, Color32::WHITE);
-    v.hyperlink_color = t.accent;
-    v.window_stroke = Stroke::new(1.0, t.field_border);
-    v.window_corner_radius = egui::CornerRadius::same(6);
-    v.menu_corner_radius = egui::CornerRadius::same(6);
-    v.popup_shadow = egui::epaint::Shadow { offset: [0, 4], blur: 16, spread: 0, color: Color32::from_black_alpha(140) };
+    let shway = t.kind == ThemeKind::Shway;
+    v.selection.bg_fill = t.accent_muted;
+    // Shway: the mint is the focus ring of text fields and the mark of selected items
+    v.selection.stroke = Stroke::new(1.0, if shway { t.focus } else { Color32::WHITE });
+    v.hyperlink_color = if shway { t.focus } else { t.accent };
+    v.window_stroke = Stroke::new(1.0, if shway { t.separator } else { t.field_border });
+    let window_radius = if shway { 10 } else { 6 };
+    v.window_corner_radius = egui::CornerRadius::same(window_radius);
+    v.menu_corner_radius = egui::CornerRadius::same(window_radius);
+    v.popup_shadow = if shway {
+        egui::epaint::Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(160) }
+    } else {
+        egui::epaint::Shadow { offset: [0, 4], blur: 16, spread: 0, color: Color32::from_black_alpha(140) }
+    };
     v.window_shadow = v.popup_shadow;
     for w in [&mut v.widgets.noninteractive, &mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
         w.corner_radius = egui::CornerRadius::same(t.radius_sm as u8);
@@ -322,7 +409,8 @@ pub fn apply_visuals(ctx: &egui::Context, t: &Tokens) {
     v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, t.text);
     v.widgets.inactive.bg_fill = t.field_bg;
     v.widgets.inactive.weak_bg_fill = t.field_bg;
-    v.widgets.inactive.bg_stroke = Stroke::new(1.0, t.field_border);
+    // Shway: soft, borderless controls; the surface step alone separates them
+    v.widgets.inactive.bg_stroke = if shway { Stroke::NONE } else { Stroke::new(1.0, t.field_border) };
     v.widgets.inactive.fg_stroke = Stroke::new(1.0, t.text);
     v.widgets.hovered.bg_fill = t.hover;
     v.widgets.hovered.weak_bg_fill = t.hover;
@@ -333,12 +421,22 @@ pub fn apply_visuals(ctx: &egui::Context, t: &Tokens) {
     v.widgets.active.fg_stroke = Stroke::new(1.0, t.tab_text_active);
     v.widgets.open.bg_fill = t.hover;
     v.widgets.open.weak_bg_fill = t.hover;
+    if shway {
+        v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, t.separator);
+        v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, t.text_dim);
+        v.widgets.inactive.fg_stroke = Stroke::new(1.0, t.text_dim);
+        v.widgets.hovered.bg_stroke = Stroke::NONE;
+        v.widgets.active.bg_stroke = Stroke::new(1.0, t.focus);
+        v.widgets.open.bg_stroke = Stroke::NONE;
+        v.slider_trailing_fill = true;
+    }
     ctx.set_visuals(v);
     ctx.global_style_mut(|s| {
-        s.spacing.item_spacing = egui::vec2(6.0, 4.0);
-        s.spacing.button_padding = egui::vec2(8.0, 3.0);
+        // Shway breathes sideways only: panels, menus and tests are laid out for 24 px rows
+        s.spacing.item_spacing = if shway { egui::vec2(8.0, 4.0) } else { egui::vec2(6.0, 4.0) };
+        s.spacing.button_padding = if shway { egui::vec2(10.0, 3.0) } else { egui::vec2(8.0, 3.0) };
         s.spacing.interact_size.y = 24.0;
-        s.spacing.menu_margin = egui::Margin::same(4);
+        s.spacing.menu_margin = egui::Margin::same(if shway { 6 } else { 4 });
         s.text_styles.insert(TextStyle::Body, FontId::new(12.0, FontFamily::Proportional));
         s.text_styles.insert(TextStyle::Button, FontId::new(12.0, FontFamily::Proportional));
         s.text_styles.insert(TextStyle::Small, FontId::new(11.0, FontFamily::Proportional));
@@ -376,7 +474,7 @@ mod tests {
             return;
         }
         let ctx = egui::Context::default();
-        for kind in [ThemeKind::Dark, ThemeKind::Medium, ThemeKind::Light] {
+        for kind in [ThemeKind::Shway, ThemeKind::Dark, ThemeKind::Medium, ThemeKind::Light] {
             install(&ctx, &Tokens::for_kind(kind));
             ctx.run_ui(egui::RawInput::default(), |_| {}).textures_delta.clear();
             ctx.fonts_mut(|fonts| {
@@ -426,6 +524,48 @@ mod tests {
         let galley = ctx.fonts_mut(|f| f.layout_no_wrap(JAPANESE.into(), FontId::new(13.0, FontFamily::Proportional), Color32::WHITE));
         assert_eq!(galley.rows.iter().map(|r| r.glyphs.len()).sum::<usize>(), JAPANESE.chars().count());
         assert!(galley.size().x > 13.0 * 4.0, "{:?}", galley.size());
+    }
+
+    /// WCAG relative-luminance contrast ratio.
+    fn contrast(a: Color32, b: Color32) -> f32 {
+        let lum = |c: Color32| {
+            let lin = |v: u8| {
+                let s = f32::from(v) / 255.0;
+                if s <= 0.040_45 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) }
+            };
+            0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b())
+        };
+        let (x, y) = (lum(a), lum(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    /// Shway's text tokens meet WCAG AA (4.5:1) on every surface they sit on; disabled text is
+    /// exempt but stays >= 3:1 on panels; the accent stays visible (3:1) and white labels on it AA.
+    #[test]
+    fn shway_text_contrast_meets_wcag_aa() {
+        let t = Tokens::for_kind(ThemeKind::Shway);
+        let surfaces = [("app", t.app_bg), ("panel", t.panel_bg), ("field", t.field_bg), ("hover", t.hover), ("selection", t.row_selected)];
+        for (name, fg) in [("text", t.text), ("text_dim", t.text_dim), ("tab_text", t.tab_text), ("menu", MENU_TEXT), ("focus", t.focus)] {
+            for (sname, bg) in surfaces {
+                let r = contrast(fg, bg);
+                assert!(r >= 4.5, "{name} on {sname}: {r:.2}");
+            }
+        }
+        for (sname, bg) in [("app", t.app_bg), ("panel", t.panel_bg), ("field", t.field_bg)] {
+            assert!(contrast(t.text_faint, bg) >= 3.0, "text_faint on {sname}");
+            assert!(contrast(t.playhead, bg) >= 3.0, "playhead on {sname}");
+            assert!(contrast(t.danger, bg) >= 4.5, "danger on {sname}");
+        }
+        for (name, bg) in [("accent", t.accent), ("accent_hover", t.accent_hover)] {
+            let r = contrast(Color32::WHITE, bg);
+            assert!(r >= 4.5, "white on {name}: {r:.2}");
+        }
+        // the stock highlight colour does not repaint Shway in Premiere-like blue
+        let stock = filmcraft_engine::settings::parse_hex(filmcraft_engine::settings::DEFAULT_HIGHLIGHT);
+        assert_eq!(t.with_appearance(stock, false).accent, t.accent);
+        assert_ne!(t.with_appearance(Some([200, 40, 120]), false).accent, t.accent);
+        assert_eq!(ThemeKind::from_pref("darkest"), ThemeKind::Dark);
+        assert_eq!(ThemeKind::from_pref(ThemeKind::default().pref_name()), ThemeKind::Shway);
     }
 
     /// Latin text keeps its UI faces, with or without craft-fonts and system Chinese fonts.

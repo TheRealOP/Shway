@@ -23,11 +23,22 @@ export interface PlaceStep {
   command: "timeline.place";
   params: {ranges: SourceRange[]};
 }
+// Ripple-delete explicit clips; linked partners go with them and later clips close the gap.
+export interface RemoveStep {
+  command: "timeline.remove";
+  params: {clips: number[]};
+}
+// Rearrange: clip (with its links) plays immediately before/after anchor on the same track.
+export interface MoveStep {
+  command: "timeline.move";
+  params: {clip: number; anchor: number; position: "before" | "after"};
+}
+export type ProposalStep = TrimStep | ReplaceStep | PlaceStep | RemoveStep | MoveStep;
 export interface EditProposal {
   expectedRevision: number;
   sequence: number;
   label: string;
-  steps: (TrimStep | ReplaceStep | PlaceStep)[];
+  steps: ProposalStep[];
 }
 export interface FrameRate {num: number; den: number}
 const TICKS_PER_SECOND = 254016000000n;
@@ -138,7 +149,7 @@ function proposalInput(value: EditProposal): EditProposal {
   const checkedLabel = label(input.label);
   if (!Array.isArray(input.steps) || input.steps.length === 0 || input.steps.length > 16) invalid("proposal requires 1–16 steps");
   let targets = 0;
-  const steps = Array.from(input.steps, (value, i): TrimStep | ReplaceStep | PlaceStep => {
+  const steps = Array.from(input.steps, (value, i): ProposalStep => {
     const step = object(value, `steps[${i}]`); keys(step, ["command", "params"], `steps[${i}]`);
     const params = object(step.params, `steps[${i}].params`);
     if (step.command === "timeline.trim") {
@@ -171,6 +182,20 @@ function proposalInput(value: EditProposal): EditProposal {
       targets += ranges.length;
       return {command: step.command, params: {ranges}};
     }
+    if (step.command === "timeline.remove") {
+      keys(params, ["clips"], "remove");
+      const clips = idList(params.clips, "clips");
+      targets += clips.length;
+      return {command: step.command, params: {clips}};
+    }
+    if (step.command === "timeline.move") {
+      keys(params, ["clip", "anchor", "position"], "move");
+      const clip = integer(params.clip, "clip", 1), anchor = integer(params.anchor, "anchor", 1);
+      if (clip === anchor) invalid("move clip and anchor must differ");
+      if (params.position !== "before" && params.position !== "after") invalid("move position must be before or after");
+      targets += 2;
+      return {command: step.command, params: {clip, anchor, position: params.position}};
+    }
     return invalid(`Unsupported proposal command: ${String(step.command)}`);
   });
   if (targets > 32) invalid("proposal exceeds 32 targets");
@@ -178,7 +203,7 @@ function proposalInput(value: EditProposal): EditProposal {
 }
 
 // Find a media item's type and duration in project.inspect's bin tree (bounded walk).
-function binItem(root: unknown, item: number): {type: unknown; duration: unknown} | null {
+export function binItem(root: unknown, item: number): {type: unknown; duration: unknown} | null {
   const stack: unknown[] = [root];
   for (let visited = 0; stack.length && visited < 100_000; visited++) {
     const node = stack.pop();

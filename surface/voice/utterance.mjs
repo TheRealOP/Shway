@@ -122,6 +122,6 @@ export function createVoice(config = {}) {
       if (gestures.length > c.maxGestures) gestures.shift();
     },
     /** @returns {{recording: boolean, id: string | null, startT: number | null}} */
-    view() { return { recording: !!rec, id: rec?.id ?? null, startT: rec?.startT ?? null }; },
+    view() { return { recording: !!rec, id: rec?.id ?? null, startT: rec?.startT ?? null, source: rec?.source ?? null }; },
   };
 }

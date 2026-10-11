@@ -369,6 +369,12 @@ pub struct UiState {
     pub dock: DockNode,
     /// Focused panel (blue outline, receives shortcuts).
     pub focused: PanelKind,
+    /// View ▸ Focus Mode: only the video and the Assistant chat are on show (the layout is kept).
+    #[serde(default)]
+    pub focus_mode: bool,
+    /// View ▸ Full-Screen Video: the Program video fills the whole window (F / Esc).
+    #[serde(default)]
+    pub video_fullscreen: bool,
     pub timeline: TimelineView,
     pub program: MonitorView,
     pub source: MonitorView,
@@ -516,6 +522,9 @@ pub struct UiState {
     /// Media Browser view state (tree, path field, Edit Columns…). See `panels::media_browser`.
     #[serde(default)]
     pub media_browser: crate::panels::media_browser::MediaBrowserUi,
+    /// Shway Assistant panel: the conversation, proposed edit and draft. See `panels::assistant`.
+    #[serde(default)]
+    pub assistant: crate::panels::assistant::AssistantUi,
 }
 
 /// An open Edit / Clip / File menu dialog: the engine command it runs on OK and the parameters
@@ -860,6 +869,8 @@ impl Default for UiState {
             workspace: "Editing".into(),
             dock: crate::dock::workspace("Editing"),
             focused: PanelKind::Timeline,
+            focus_mode: false,
+            video_fullscreen: false,
             timeline: TimelineView::default(),
             program: MonitorView::default(),
             source: MonitorView::default(),
@@ -913,6 +924,7 @@ impl Default for UiState {
             keys: Default::default(),
             project_panel: Default::default(),
             media_browser: Default::default(),
+            assistant: Default::default(),
         }
     }
 }

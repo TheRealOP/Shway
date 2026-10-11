@@ -1,8 +1,9 @@
 // Local Gemini proxy for the Shway surface: the browser calls this on localhost, so the API key
 // never reaches a web page. Node ≥ 22, no packages.
 //   node shway/gemini-server.mjs [--port 8790]
-// Reads GEMINI_API_KEY (and optional GEMINI_MODEL) from the main checkout's .env, shared by every
-// worktree, or from the file named by SHWAY_ENV.
+// Reads GEMINI_API_KEY (and optional GEMINI_MODEL, JEV_KEY) from the main checkout's .env, shared by
+// every worktree, or from the file named by SHWAY_ENV. With JEV_KEY, POST /decide forwards TypeSafe Jev
+// questions (https://api.typesafe.ai/redoc, POST /v1/systemone) with the key kept here.
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -17,6 +18,9 @@ const AUDIO_TYPES = ["audio/webm", "audio/ogg", "audio/mp4", "audio/wav"];
 const TRANSCRIBE = "Transcribe this audio verbatim. Return only the spoken words, no commentary, labels or timestamps.";
 const MAX_PROMPT = 500_000;
 const TIMEOUT_MS = 90_000;
+const JEV_API = "https://api.typesafe.ai/v1/systemone";
+export const DEFAULT_JEV_MODEL = "jev-1.13.0"; // pinned: jev-latest moves; GET /v1/models lists aliases
+const JEV_TIMEOUT_MS = 10_000;
 
 /** KEY=VALUE lines; comments, blank lines and `export ` prefixes allowed; one pair of quotes stripped. */
 export function parseEnv(text) {
@@ -89,8 +93,21 @@ export function buildTranscribeRequest(body, model = DEFAULT_MODEL) {
   };
 }
 
-/** @param {{key: string, model?: string, fetch?: typeof fetch}} opts */
-export function createGeminiServer({ key, model = DEFAULT_MODEL, fetch: doFetch = fetch }) {
+/** Validate a /decide request ({state, questions, model?}): the TypeSafe systemone body, bounded. */
+export function buildDecideRequest(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) throw new HttpError(400, "body must be a JSON object");
+  for (const k of Object.keys(body)) if (!["state", "questions", "model"].includes(k)) throw new HttpError(400, `unsupported field ${k}`);
+  const { state, questions, model = DEFAULT_JEV_MODEL } = body;
+  if (state === undefined || state === null) throw new HttpError(400, "state is required");
+  const names = questions && typeof questions === "object" && !Array.isArray(questions) ? Object.keys(questions) : [];
+  if (names.length < 1 || names.length > 8) throw new HttpError(400, "questions must be an object with 1–8 named questions");
+  for (const n of names) if (!["choice", "noul", "score"].includes(questions[n]?.type)) throw new HttpError(400, `question ${n} needs type choice, noul or score`);
+  if (typeof model !== "string" || !/^jev-[a-z0-9.-]{1,40}$/.test(model)) throw new HttpError(400, "model must be a jev-* name");
+  return { model, state, questions };
+}
+
+/** @param {{key: string, model?: string, jevKey?: string, fetch?: typeof fetch}} opts */
+export function createGeminiServer({ key, model = DEFAULT_MODEL, jevKey = "", fetch: doFetch = fetch }) {
   if (!key) throw new Error("GEMINI_API_KEY is empty");
   return createServer(async (req, res) => {
     const origin = req.headers.origin;
@@ -110,9 +127,10 @@ export function createGeminiServer({ key, model = DEFAULT_MODEL, fetch: doFetch 
         });
         return res.end();
       }
-      if (req.method === "GET" && req.url === "/health") return send(200, { ok: true, model });
-      const route = req.method === "POST" && (req.url === "/generate" || req.url === "/transcribe") ? req.url : null;
-      if (!route) throw new HttpError(404, "use POST /generate, POST /transcribe or GET /health");
+      if (req.method === "GET" && req.url === "/health") return send(200, { ok: true, model, jev: Boolean(jevKey) });
+      const route = req.method === "POST" && ["/generate", "/transcribe", "/decide"].includes(req.url) ? req.url : null;
+      if (!route) throw new HttpError(404, "use POST /generate, /transcribe, /decide or GET /health");
+      if (route === "/decide" && !jevKey) throw new HttpError(503, "JEV_KEY is not configured");
       const limit = route === "/transcribe" ? MAX_AUDIO_BODY : MAX_BODY;
       if (!String(req.headers["content-type"] ?? "").startsWith("application/json")) throw new HttpError(415, "content-type must be application/json");
 
@@ -128,6 +146,19 @@ export function createGeminiServer({ key, model = DEFAULT_MODEL, fetch: doFetch 
       if (size > limit) throw new HttpError(413, "request body too large");
       let body;
       try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { throw new HttpError(400, "invalid JSON"); }
+      if (route === "/decide") {
+        const d = buildDecideRequest(body);
+        const upstream = await doFetch(JEV_API, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${jevKey}` },
+          body: JSON.stringify(d),
+          signal: AbortSignal.timeout(JEV_TIMEOUT_MS),
+        });
+        const data = await upstream.json().catch(() => null);
+        if (!upstream.ok) throw new HttpError(502, `Jev ${upstream.status}: ${JSON.stringify(data?.detail ?? data?.error ?? "request failed").slice(0, 300)}`);
+        if (!data?.answers || typeof data.answers !== "object") throw new HttpError(502, "Jev returned no answers");
+        return send(200, { model: data.model, answers: data.answers, usage: data.usage ?? null });
+      }
       const r = route === "/transcribe" ? buildTranscribeRequest(body, model) : buildRequest(body, model);
 
       const upstream = await doFetch(`${API}/${r.model}:generateContent`, {
@@ -147,7 +178,9 @@ export function createGeminiServer({ key, model = DEFAULT_MODEL, fetch: doFetch 
     } catch (e) {
       const status = e instanceof HttpError ? e.status : e?.name === "TimeoutError" ? 504 : 500;
       // Never echo the key, even if an upstream error message contains it.
-      return send(status, { error: String(e?.message ?? e).split(key).join("[key]") });
+      let message = String(e?.message ?? e).split(key).join("[key]");
+      if (jevKey) message = message.split(jevKey).join("[key]");
+      return send(status, { error: message });
     }
   });
 }
@@ -164,7 +197,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     process.exit(1);
   }
   const model = process.env.GEMINI_MODEL || env.GEMINI_MODEL || DEFAULT_MODEL;
-  createGeminiServer({ key, model }).listen(port, "127.0.0.1", () => {
-    console.log(`Gemini proxy on http://127.0.0.1:${port} (model ${model}, key from ${process.env.GEMINI_API_KEY ? "environment" : file})`);
+  const jevKey = process.env.JEV_KEY || env.JEV_KEY || "";
+  createGeminiServer({ key, model, jevKey }).listen(port, "127.0.0.1", () => {
+    console.log(`Gemini proxy on http://127.0.0.1:${port} (model ${model}, key from ${process.env.GEMINI_API_KEY ? "environment" : file}; Jev ${jevKey ? "on" : "off"})`);
   });
 }
