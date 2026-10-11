@@ -8,7 +8,7 @@
 // Sketch → edit (DEV-93): with a finished sketch on the Program monitor, /chat first reads the figure
 // (vision model, fixed enum); code maps it to a transition and the message picks the clips.
 // --camera runs the webcam worker (shway/hands.py, via uv) and handles its hand gestures in-process.
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { connect } from "node:net";
 import { appendFileSync, readFileSync, statSync, unlinkSync } from "node:fs";
@@ -330,15 +330,19 @@ export function createAssistant({ editor = "127.0.0.1:9876", proxy = "http://127
 
   /** Program monitor screenshot (with the ink) + the strokes → the vision model's figure. */
   async function readSketch(ink) {
-    const path = join(tmpdir(), `shway-sketch-${process.pid}.png`);
-    let data;
+    const path = join(tmpdir(), `shway-sketch-${process.pid}.png`), small = `${path}.jpg`;
+    let data, mimeType = "image/png";
     try {
       await transport.request("ui.screenshot", { panel: "program", path });
-      if (statSync(path).size > MAX_IMAGE_BYTES) throw new UserError("The Program monitor picture is too large to send for the sketch; make the panel smaller and ask again. Nothing changed.");
-      data = readFileSync(path).toString("base64");
-    } finally { try { unlinkSync(path); } catch { /* not written */ } }
+      // A Retina PNG is several MB; the model needs no more than ~1280 px. macOS `sips` shrinks it to a JPEG;
+      // without it (or on a picture it can't read) the PNG goes as it is.
+      let file = path;
+      try { execFileSync("sips", ["-Z", "1280", "-s", "format", "jpeg", path, "--out", small], { stdio: "ignore" }); file = small; mimeType = "image/jpeg"; } catch { /* keep the PNG */ }
+      if (statSync(file).size > MAX_IMAGE_BYTES) throw new UserError("The Program monitor picture is too large to send for the sketch; make the panel smaller and ask again. Nothing changed.");
+      data = readFileSync(file).toString("base64");
+    } finally { for (const f of [path, small]) try { unlinkSync(f); } catch { /* not written */ } }
     const strokes = JSON.stringify(ink.strokes.map((s) => s.map(([x, y]) => [Math.round(x * 1000) / 1000, Math.round(y * 1000) / 1000])));
-    const raw = await generate({ model: SKETCH_MODEL, system: SKETCH_SYSTEM, schema: SKETCH_SCHEMA, images: [{ mimeType: "image/png", data }],
+    const raw = await generate({ model: SKETCH_MODEL, system: SKETCH_SYSTEM, schema: SKETCH_SCHEMA, images: [{ mimeType, data }],
       prompt: `The image is the Program monitor with the sketch drawn on it. STROKES (JSON data, x right and y down, 0–1 over the picture): ${strokes}` });
     return readFigure(raw);
   }
