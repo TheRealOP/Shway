@@ -32,8 +32,10 @@
 </head>
 <body>
 <h1>Shway review remote</h1>
-<p class="note">Hold <kbd>V</kbd>, the button, or a still pinch (0.8 s) to stop playback and explain. Saying only “stop” just stops.
-  While holding <kbd>V</kbd>, pinch + twist to scrub to the end of the part you mean. Esc or Resume cancels and plays on.
+<p class="note">Hold <kbd>V</kbd> or the button to stop playback and explain. Saying only “stop” just stops.
+  Hand: point = laser dot on the Program monitor; quick thumb–index double tap = draw on/off (pointing draws; the sketch stays);
+  fist = pause, slide the fist to scrub, open to drop; 🤘 + twist = shuttle (<kbd>Shift</kbd> = frame steps).
+  Esc clears the sketch, or cancels a scrub back to where it started; Resume plays on.
   Accept or reject the proposal in the editor's chat panel.</p>
 <div id="status" role="status">Ready.</div>
 <section>
@@ -60,14 +62,18 @@ import { createRecognizer } from "./gestures/recognizer.mjs";
 import { openCamera, runHands, drawOverlay, flashFor, LABELS } from "./gestures/hands.mjs";
 import { createVoice } from "./voice/utterance.mjs";
 import { openMic, createCapture } from "./voice/mic.mjs";
-import { createHoldToTalk } from "./demo.mjs";
-import { createReview, poster, transcribe } from "./review.mjs";
+import { createReview, createInk, createInkSender, poster, transcribe } from "./review.mjs";
 
 const $ = (id) => document.getElementById(id);
 const keys = { key: false, fine: false, cancel: false };
-let recognizer = createRecognizer(), hold = createHoldToTalk(), flash = null, stream = null, handsLoop = null;
+let recognizer = createRecognizer(), flash = null, stream = null, handsLoop = null;
 const voice = createVoice();
-const review = createReview((path, body) => poster($("asst").value.replace(/\/$/, ""))(path, body));
+const post = (path, body) => poster($("asst").value.replace(/\/$/, ""))(path, body);
+const review = createReview(post);
+// Ink: pointer dot + sketch on the editor's Program monitor via the assistant's POST /ink (≤ 30 Hz, latest wins).
+const ink = createInk();
+const sendInk = createInkSender(post, { onError: (e) => show(`Ink not sent: ${e?.message ?? e}`) });
+const inkChanged = (changed) => { if (changed) sendInk(ink.state()); };
 const show = (s) => { if (!s) return; $("status").textContent = s; $("log").textContent = `${new Date().toLocaleTimeString()} ${s}\n` + $("log").textContent.slice(0, 4000); };
 
 // ---- Push-to-talk: its start is the stop; the utterance becomes one note bound to that moment.
@@ -97,7 +103,7 @@ $("typed").onsubmit = async (ev) => {
   show(await review.stop()); show(await review.note(text));
 };
 addEventListener("keydown", (e) => {
-  if (e.key === "Escape") { keys.cancel = true; if (voice.view().recording) talk(voice.cancel(performance.now())); else review.cancel().then(show); return; }
+  if (e.key === "Escape") { keys.cancel = true; inkChanged(ink.clear()); if (voice.view().recording) talk(voice.cancel(performance.now())); else review.cancel().then(show); return; }
   if (e.target instanceof HTMLInputElement || e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.code === "Space") { keys.key = true; e.preventDefault(); }
   if (e.key === "Shift") keys.fine = true;
@@ -110,8 +116,9 @@ addEventListener("keyup", (e) => {
 });
 addEventListener("blur", () => { keys.key = keys.fine = false; if (voice.view().recording) talk(voice.cancel(performance.now())); });
 
-// ---- Gestures: transport to the editor through the assistant; still pinch talks.
+// ---- Gestures: transport to the editor through the assistant; pointer/pen/draw events to the ink.
 function onGesture(e) {
+  inkChanged(ink.event(e));
   voice.gesture(e);
   flash = flashFor(e, e.t) ?? flash;
   review.gesture(e).then(show);
@@ -119,11 +126,11 @@ function onGesture(e) {
 function onFrame(t, hand) {
   for (const e of recognizer.step({ t, hand, ...keys })) onGesture(e);
   keys.cancel = false;
-  const v = recognizer.view(), h = hold.step(t, v);
-  if (h === "talk") talk(voice.start(t, {}, "gesture"));
-  else if (h === "done") talk(voice.stop(t));
-  else if (h === "abort") talk(voice.cancel(t));
-  $("hand").textContent = voice.view().recording ? "Talking — let go to finish" : LABELS[v.state] ?? v.state;
+  const v = recognizer.view();
+  inkChanged(ink.visible(v.pointer !== null));
+  $("hand").textContent = voice.view().recording ? "Talking — release V to finish"
+    : v.state === "Idle" && v.drawing ? (v.penDown ? "drawing" : "drawing — point to draw, double tap to finish")
+    : v.state === "Idle" && v.pose === "point" ? "pointer — double tap thumb + index to draw" : LABELS[v.state] ?? v.state;
   const c = $("o"), video = $("v");
   if (video.videoWidth && c.width !== video.videoWidth) { c.width = video.videoWidth; c.height = video.videoHeight; }
   drawOverlay(c, hand, v, t, flash);
@@ -140,8 +147,8 @@ async function setCamera(on) {
     } else {
       for (const track of video.srcObject?.getTracks() ?? []) track.stop();
       video.srcObject = null;
-      onFrame(performance.now(), null); // tracking loss first: stops a shuttle, aborts a pinch-held recording
-      recognizer = createRecognizer(); hold = createHoldToTalk();
+      onFrame(performance.now(), null); // tracking loss first: stops a shuttle, lifts the pen, hides the dot
+      recognizer = createRecognizer();
     }
   } catch (e) {
     handsLoop = null; on = false;
@@ -156,7 +163,7 @@ $("cam").onclick = () => setCamera($("cam").getAttribute("aria-pressed") !== "tr
 openMic().then((m) => { if (m.error) $("micErr").textContent = m.error; else stream = m.stream; });
 
 // Automation hooks (synthetic gestures / notes without camera or microphone).
-window.shwayReview = { review, gesture: (e) => onGesture({ t: performance.now(), ...e }), say: async (text) => { show(await review.stop()); show(await review.note(text)); } };
+window.shwayReview = { review, ink: () => ink.state(), gesture: (e) => onGesture({ t: performance.now(), ...e }), say: async (text) => { show(await review.stop()); show(await review.note(text)); } };
 </script>
 </body>
 </html>
