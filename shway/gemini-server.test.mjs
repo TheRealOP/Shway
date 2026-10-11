@@ -86,7 +86,7 @@ test("foreign origins, wrong methods, content types and oversized bodies are ref
   assert.equal((await s.call("/nope", { body: { prompt: "x" } })).status, 404);
   assert.equal((await s.call("/generate", { body: { prompt: "x" }, headers: { "content-type": "text/plain" } })).status, 415);
   assert.equal((await s.call("/generate", { body: "{not json" })).status, 400);
-  assert.equal((await s.call("/generate", { body: { prompt: "x".repeat(3 * 1024 * 1024) } })).status, 413);
+  assert.equal((await s.call("/generate", { body: { prompt: "x".repeat(10 * 1024 * 1024) } })).status, 413);
   assert.equal(s.seen.length, 0);
   await s.close();
 });
@@ -116,14 +116,14 @@ test("transcribe forwards inline audio with a verbatim instruction and returns t
   await s.close();
 });
 
-test("transcribe rejects bad audio requests before calling Gemini; only it gets the larger cap", async () => {
+test("transcribe rejects bad audio requests before calling Gemini; it gets the largest cap", async () => {
   const s = await serve();
   for (const body of [{}, { mimeType: "video/mp4", data: "AAAA" }, { mimeType: "audio/wav" }, { mimeType: "audio/wav", data: "" },
     { mimeType: "audio/wav", data: "not base64!" }, { mimeType: "audio/wav", data: "AAAA", prompt: "x" }, { mimeType: 5, data: "AAAA" }]) {
     assert.equal((await s.call("/transcribe", { body })).status, 400, JSON.stringify(body));
   }
   const big = "A".repeat(5 * 1024 * 1024);
-  assert.equal((await s.call("/generate", { body: { prompt: big } })).status, 413);
+  assert.equal((await s.call("/generate", { body: { prompt: "x".repeat(10 * 1024 * 1024) } })).status, 413);
   assert.equal((await s.call("/transcribe", { body: { mimeType: "audio/wav", data: "A".repeat(11 * 1024 * 1024) } })).status, 413);
   assert.equal((await s.call("/transcribe", { body: { mimeType: "audio/wav", data: big } })).status, 200);
   assert.equal((await s.call("/transcribe", { body: { mimeType: "audio/wav", data: "AAAA" }, headers: { origin: "https://evil.example" } })).status, 403);
@@ -159,5 +159,31 @@ test("decide is off without a key, and upstream errors never contain it", async 
   const r = await s.call("/decide", { body: { state: 1, questions: QUESTION } });
   assert.equal(r.status, 502);
   assert.ok(!JSON.stringify(r.json).includes(JEV), r.json.error);
+  await s.close();
+});
+
+test("generate forwards one inline image before the prompt", async () => {
+  const s = await serve({ status: 200, body: { candidates: [{ content: { parts: [{ text: '{"figure":"split_outward"}' }] } }] } });
+  const data = Buffer.from("\x89PNG fake").toString("base64");
+  const r = await s.call("/generate", { body: { prompt: "what is drawn?", model: "gemini-3.1-pro-preview", schema: { type: "OBJECT" }, images: [{ mimeType: "image/png", data }] } });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json.json, { figure: "split_outward" });
+  const [{ url, body }] = s.seen;
+  assert.match(url, /gemini-3\.1-pro-preview:generateContent$/);
+  assert.deepEqual(body.contents[0].parts, [{ inlineData: { mimeType: "image/png", data } }, { text: "what is drawn?" }]);
+  await s.close();
+});
+
+test("generate refuses bad or oversized images before calling Gemini", async () => {
+  const s = await serve();
+  const png = (data) => ({ mimeType: "image/png", data });
+  for (const images of [{}, "x", [png("AAAA"), png("AAAA")], [{ mimeType: "image/gif", data: "AAAA" }], [png("")], [png("not base64!")],
+    [{ ...png("AAAA"), name: "x" }], [null]]) {
+    assert.equal((await s.call("/generate", { body: { prompt: "p", images } })).status, 400, JSON.stringify(images));
+  }
+  // Over the image cap but under the body cap: refused by size, not by the body limit.
+  assert.equal((await s.call("/generate", { body: { prompt: "p", images: [png("A".repeat(8.5 * 1024 * 1024))] } })).status, 413);
+  assert.equal((await s.call("/generate", { body: { prompt: "p", images: [png("A".repeat(7 * 1024 * 1024))] } })).status, 200);
+  assert.equal(s.seen.length, 1);
   await s.close();
 });

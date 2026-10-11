@@ -1,6 +1,7 @@
 // Local Gemini proxy for the Shway surface: the browser calls this on localhost, so the API key
 // never reaches a web page. Node ≥ 22, no packages.
 //   node shway/gemini-server.mjs [--port 8790]
+// POST /generate takes {prompt, system?, schema?, model?, images?: [{mimeType: image/png|image/jpeg, data}]} (one image).
 // Reads GEMINI_API_KEY (and optional GEMINI_MODEL, JEV_KEY) from the main checkout's .env, shared by
 // every worktree, or from the file named by SHWAY_ENV. With JEV_KEY, POST /decide forwards TypeSafe Jev
 // questions (https://api.typesafe.ai/redoc, POST /v1/systemone) with the key kept here.
@@ -14,6 +15,9 @@ export const DEFAULT_MODEL = "gemini-3.8-flash";
 const API = "https://generativelanguage.googleapis.com/v1beta/models";
 const MAX_BODY = 2 * 1024 * 1024;
 const MAX_AUDIO_BODY = 10 * 1024 * 1024; // /transcribe only: base64 audio of a ≤15 s push-to-talk
+export const MAX_IMAGE_BYTES = 6 * 1024 * 1024; // one Program monitor PNG at Retina size
+const MAX_IMAGE_BODY = 9 * 1024 * 1024; // /generate: that image in base64 plus the prompt
+const IMAGE_TYPES = ["image/png", "image/jpeg"];
 const AUDIO_TYPES = ["audio/webm", "audio/ogg", "audio/mp4", "audio/wav"];
 const TRANSCRIBE = "Transcribe this audio verbatim. Return only the spoken words, no commentary, labels or timestamps.";
 const MAX_PROMPT = 500_000;
@@ -61,17 +65,24 @@ class HttpError extends Error {
 /** Validate a /generate request and build the Gemini generateContent body. */
 export function buildRequest(body, defaultModel = DEFAULT_MODEL) {
   if (!body || typeof body !== "object" || Array.isArray(body)) throw new HttpError(400, "body must be a JSON object");
-  for (const k of Object.keys(body)) if (!["prompt", "system", "schema", "model"].includes(k)) throw new HttpError(400, `unsupported field ${k}`);
-  const { prompt, system, schema, model = defaultModel } = body;
+  for (const k of Object.keys(body)) if (!["prompt", "system", "schema", "model", "images"].includes(k)) throw new HttpError(400, `unsupported field ${k}`);
+  const { prompt, system, schema, model = defaultModel, images = [] } = body;
   if (typeof prompt !== "string" || !prompt.trim() || prompt.length > MAX_PROMPT) throw new HttpError(400, "prompt must be a non-empty string");
   if (system !== undefined && (typeof system !== "string" || system.length > MAX_PROMPT)) throw new HttpError(400, "system must be a string");
   if (schema !== undefined && (!schema || typeof schema !== "object" || Array.isArray(schema))) throw new HttpError(400, "schema must be a JSON schema object");
   if (typeof model !== "string" || !/^gemini-[a-z0-9.-]{1,60}$/.test(model)) throw new HttpError(400, "model must be a gemini-* id");
+  if (!Array.isArray(images) || images.length > 1) throw new HttpError(400, "images must be an array of at most 1 image");
+  for (const i of images) {
+    if (!i || typeof i !== "object" || Object.keys(i).some((k) => !["mimeType", "data"].includes(k))) throw new HttpError(400, "an image is {mimeType, data}");
+    if (!IMAGE_TYPES.includes(i.mimeType)) throw new HttpError(400, `image mimeType must be one of ${IMAGE_TYPES.join(", ")}`);
+    if (typeof i.data !== "string" || !i.data || !/^[A-Za-z0-9+/]+={0,2}$/.test(i.data)) throw new HttpError(400, "image data must be non-empty base64");
+    if (Math.floor((i.data.length * 3) / 4) > MAX_IMAGE_BYTES) throw new HttpError(413, "image too large");
+  }
   return {
     model,
     json: schema !== undefined,
     payload: {
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      contents: [{ role: "user", parts: [...images.map((i) => ({ inlineData: { mimeType: i.mimeType, data: i.data } })), { text: prompt }] }],
       ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
       ...(schema ? { generationConfig: { responseMimeType: "application/json", responseSchema: schema } } : {}),
     },
@@ -131,7 +142,7 @@ export function createGeminiServer({ key, model = DEFAULT_MODEL, jevKey = "", fe
       const route = req.method === "POST" && ["/generate", "/transcribe", "/decide"].includes(req.url) ? req.url : null;
       if (!route) throw new HttpError(404, "use POST /generate, /transcribe, /decide or GET /health");
       if (route === "/decide" && !jevKey) throw new HttpError(503, "JEV_KEY is not configured");
-      const limit = route === "/transcribe" ? MAX_AUDIO_BODY : MAX_BODY;
+      const limit = route === "/transcribe" ? MAX_AUDIO_BODY : route === "/generate" ? MAX_IMAGE_BODY : MAX_BODY;
       if (!String(req.headers["content-type"] ?? "").startsWith("application/json")) throw new HttpError(415, "content-type must be application/json");
 
       let size = 0;
