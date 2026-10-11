@@ -133,7 +133,7 @@ const plan = await planFirstCut({brief, script, takes, generate: proxyGenerate()
   and its `settings.frame_rate`. It widens each range outward with `alignRange` and stages the
   ranges, in script order, after the sequence's content via `adapter.assemble` (`timeline.place`,
   V1 + linked A1). Then `adapter.commit(preview.token)` (one undo step) or `adapter.cancel(...)`.
-  Use an empty sequence for a clean cut. It needs an active sequence and 1–32 ranges. A last word
+  Use an empty sequence for a clean cut. It needs an active sequence and 1–512 ranges. A last word
   that ends exactly at the source end can widen past it and be refused.
 
 ## Gemini proxy (creative reasoning)
@@ -301,11 +301,13 @@ node --test shway/transcribe-local.test.mjs
 
 `node shway/longform.mjs segments|plan|assemble|compare|test` (usage in the file header). Splits
 `transcribe-local.mjs` transcripts into word-exact segments at pauses, asks Gemini (local proxy,
-segment numbers + text + one-line clip descriptions, never times) for a hook/intro/body/ending
-playlist, validates it (numbers exist, no duplicates, 500–1600 spoken words; one retry quoting the
-error), widens ranges to whole frames with `alignRange`, and places them with `proposal.preview` →
-`proposal.commit`. The engine caps a proposal at 32 ranges, so a longer cut commits as several
-labelled proposals. Needs a CLI built from this tree (`proposal` `timeline.place` steps).
+segment numbers + text + file names and recording times, never times inside a clip) for chronological
+sections, validates it (numbers exist, no duplicates, increasing, 500–2000 spoken words; one retry quoting the
+error), widens ranges to whole frames with `alignRange` (clamped to the source end: `clampRange`), and places them with `proposal.preview` →
+`proposal.commit`. The engine caps `timeline.place` at 512 ranges per proposal, so a cut is one proposal
+(one undo step). `planPrompt({segments, brief, words})` and `planCut(...)` are shared with the chat
+assistant's `first_cut`; the CLI passes its ShellHacks vlog text plus `clips.json` as the brief.
+Needs a CLI built from this tree (`proposal` `timeline.place` steps).
 
 ## Chat assistant (`assistant.mjs`)
 
@@ -315,7 +317,7 @@ It needs Node 23 or later, because it imports `adapter.ts` and `replace.ts`. It 
 ```sh
 filmcraft --control 9876 project.fcproj                 # the desktop editor
 node shway/gemini-server.mjs --port 8790                # holds the Gemini / Jev keys
-node shway/assistant.mjs --port 8793 --editor 127.0.0.1:9876 --proxy http://127.0.0.1:8790 [--takes takes.json] [--camera]
+node shway/assistant.mjs --port 8793 --editor 127.0.0.1:9876 --proxy http://127.0.0.1:8790 [--takes takes.json] [--camera] [--cli target/release/filmcraft-cli]
 node --test shway/assistant.test.mjs                    # fake editor (TCP) + fake proxy
 ```
 
@@ -341,6 +343,29 @@ restart the assistant to retry. Voice from the old browser page is unavailable u
   Accept or reject with nothing pending also returns 409. An unreachable editor or proxy returns 502.
 - **Memory:** the conversation is kept in memory only and capped at 200 messages.
 
+**First cut (`first_cut{brief, minutes}`, DEV-90).** "Make me a 2-minute first cut, cut the rambling" maps here.
+`/chat` answers at once and a background job does the work, posting progress and the result into
+`messages` (the panel polls `/chat/state`; `busy` stays true meanwhile, and other chat messages get a
+"still building" reply). The job:
+1. Takes every **Movie** bin item with sound from `project.inspect` (which reports `path`, `hasAudio`,
+   `width`, `height`, `frameRate` per media item). An empty bin gets "import your clips"; without `--cli`
+   it says it can't transcribe. Audio-only files are left out: proposal placement is V1 + linked A1,
+   and a separate recorder would repeat the camera's speech.
+2. Orders clips by recording time (`recordedAt`: Sony `M01.XML`, else QuickTime creation date via
+   ffprobe if installed, else file name) and transcribes each one **out of process** with
+   `transcribeFile` (a `filmcraft-cli` built with `--features whisper`; the editor's control channel
+   runs on its UI thread). Results are cached in `<FilmCraft data dir>/shway-transcripts/`, keyed by
+   path + size + mtime. A clip that fails is skipped and named.
+3. Segments the words; Gemini (via the proxy) gets the creator's brief, file names, recording times and
+   numbered segment text only, and chooses numbers within a word budget (150 words/min ±25%, clamped
+   to what was said). `validatePlan` + one retry; `toRanges` puts every range in recording order and
+   takes its times from word timestamps (padded into the pauses), then `clampRange` frame-aligns them.
+4. Attaches each transcript (`transcript.set`, so "what do I say in clip 3?" works after), creates a
+   "First cut" sequence at the first chosen clip's size and rate if the active one has clips, and stages
+   ONE `timeline.place` preview (V1 + A1). The reply gives the title, length, sections and what was left
+   out; accept is one undo step. If staging fails, the job undoes its own transcripts and sequence
+   (only if nothing else changed meanwhile) and says so.
+
 **How a message becomes an edit:**
 
 1. The service cancels any older pending preview, because the engine holds one at a time.
@@ -349,7 +374,7 @@ restart the assistant to retry. Voice from the old browser page is unavailable u
    `transcript.inspect`. The model gets this as JSON data, never as instructions. Linked audio is
    folded into its video clip.
 3. Gemini (`POST {proxy}/generate` with a response schema) picks one action from the allowlist. Each
-   action has its own nested object, and every field in it is required: `answer`, `remove{clips}`,
+   action has its own nested object, and every field in it is required: `answer`, `first_cut{brief, minutes}`, `remove{clips}`,
    `trim{clip, edge, direction, amount, unit}`, `move{clip, target, position}`,
    `replace_take{correction}`, `edit{steps}` (approved commands with explicit clips and `argsJson`),
    `navigate{operation,value}`, `transition{from, to, effect, direction}` and, only while a finished

@@ -3,27 +3,33 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer as tcp } from "node:net";
 import { createServer as http } from "node:http";
-import { existsSync, writeFileSync } from "node:fs";
-import { controlTransport, createAssistant, createCamera, fit, readInk, validateAction, SKETCH_MODEL } from "./assistant.mjs";
+import { existsSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
+import { controlTransport, createAssistant, createCamera, fit, footage, readInk, validateAction, wordBudget, SKETCH_MODEL } from "./assistant.mjs";
 import { MAX_IMAGE_BYTES } from "./gemini-server.mjs";
 
 const TPS = 254016000000, F = TPS / 30;
 const REQUIRED = ["project.inspect", "sequence.inspect", "timeline.select", "playhead.set", "edit.undo", "file.exportMedia", "jobs.list",
   "proposal.preview", "proposal.inspect", "proposal.cancel", "proposal.commit", "proposal.render", "transcript.inspect",
-  "playhead.step", "playhead.nextEdit", "playhead.prevEdit"];
+  "playhead.step", "playhead.nextEdit", "playhead.prevEdit", "transcript.set"];
 
 const clip = (clip, item, link, start, dur, sourceIn, name) => ({ clip, item, link, name, start: start * F, duration: dur * F, sourceIn: sourceIn * F, sourceOut: (sourceIn + dur) * F });
 
 function fakeEditor() {
-  const st = { revision: 5, proposal: null, next: 1, history: [], previews: [], renders: [], onPreview: null, playhead: 400 * F, playing: true, ui: [], ink: [], camera: [], inkGate: null, shots: [], shotSize: 64, monitorFrame: null, monitorRevision: null };
-  const seq = () => ({
+  const st = { revision: 5, proposal: null, next: 1, history: [], previews: [], renders: [], onPreview: null, playhead: 400 * F, playing: true, ui: [], ink: [], camera: [], inkGate: null, shots: [], shotSize: 64, monitorFrame: null, monitorRevision: null,
+    root: null, active: 27, transcripts: [], sequences: [], undone: 0 };
+  const seq = () => st.active !== 27 ? { id: st.active, name: "First cut", duration: 0, settings: { frame_rate: { num: 25, den: 1 } }, playhead: 0, selection: [], video: [{ id: 3, locked: false, items: [] }], audio: [{ id: 4, locked: false, items: [] }] } : ({
     id: 27, name: "Cut", duration: 450 * F, settings: { frame_rate: { num: 30, den: 1 } }, playhead: 0, selection: [],
     video: [{ id: 1, locked: false, items: [clip(10, 1, 1, 0, 300, 30, "C5500.MP4"), clip(12, 2, 2, 300, 150, 0, "C5517.MP4")] }],
     audio: [{ id: 2, locked: false, items: [clip(11, 1, 1, 0, 300, 30, "C5500.MP4"), clip(13, 2, 2, 300, 150, 0, "C5517.MP4")] }],
   });
   const exec = (command, p) => {
     switch (command) {
-      case "project.inspect": return { revision: st.revision, activeSequence: 27, root: { children: [{ item: 1, type: "Movie", duration: 1000 * F }, { item: 2, type: "Movie", duration: 150 * F }] } };
+      case "project.inspect": return { revision: st.revision, activeSequence: st.active, root: st.root ?? { children: [{ item: 1, type: "Movie", duration: 1000 * F }, { item: 2, type: "Movie", duration: 150 * F }] } };
+      case "transcript.set": st.transcripts.push(p); st.revision++; return { item: p.item, words: p.transcript.words.length };
+      case "file.newSequence": st.sequences.push(p); st.revision++; st.active = 28; return { sequence: 28 };
+      case "edit.undo": st.undone++; st.revision++; if (st.sequences.length && st.undone === 1) st.active = 27; return { undone: "New Sequence" };
       case "sequence.inspect": return seq();
       case "playhead.set": st.ui.push(["seek", p.time]); st.playhead = p.time; return {};
       case "playhead.step": st.playhead += p.frames * F; return {};
@@ -695,4 +701,146 @@ test("native camera ink callback binds the paused frame and reaches multimodal i
   assert.match(r.body.reply, /Preview ready/);
   assert.equal(s.proxy.prompts[0].images.length, 1);
   await s.call("/chat/reject", {});
+});
+
+// ---- First cut (DEV-90): bin footage → out-of-process transcripts → numbered plan → one timeline.place preview.
+const S = TPS;
+/** Three words per segment, 1.1 s pauses between segments: every segment is its own range unless neighbours are chosen. */
+const speech = (n, tag) => ({ language: "en", words: Array.from({ length: n }, (_, i) => ["one", "two", `${tag}${i}.`].map((text, j) => ({ text, start: Math.round((2 * i + 0.3 * j) * S), end: Math.round((2 * i + 0.3 * j + 0.25) * S) }))).flat() });
+
+async function firstCutSetup({ plans = [], failing = ["D.MP4"], hold = false } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "shway-firstcut-"));
+  const files = ["A.MP4", "B.MP4", "C.MP4", "D.MP4"].map((f) => { writeFileSync(join(dir, f), f); return join(dir, f); });
+  // Recorded B, C, A (file names say A, B, C); D has no recording time.
+  const recorded = { "B.MP4": 1, "C.MP4": 2, "A.MP4": 3 };
+  const calls = [], requests = [];
+  let release = null;
+  const gate = hold ? new Promise((r) => (release = r)) : null;
+  const transcribe = async (path) => {
+    calls.push(basename(path));
+    if (gate) await gate;
+    if (failing.includes(basename(path))) throw new Error("whisper: boom\nstack");
+    return speech(30, basename(path)[0]);
+  };
+  const answers = [...plans];
+  const generate = async (req) => { requests.push(req); return answers.shift(); };
+  const s = await setup({ transcribe, generate, timeOf: (p) => recorded[basename(p)] ?? null, cacheDir: join(dir, "cache") });
+  s.editor.root = { children: [
+    { id: 1, name: "Footage", children: files.map((path, i) => ({ item: 41 + i, name: basename(path), type: "Movie", hasAudio: true, path, duration: 70 * S, width: 1920, height: 1080, frameRate: { num: 25, den: 1 } })) },
+    { item: 50, type: "Audio", hasAudio: true, path: join(dir, "voice.wav"), duration: 70 * S }, { item: 51, type: "Movie", hasAudio: false, path: join(dir, "broll.mp4"), duration: 9 * S },
+  ] };
+  return { ...s, dir, calls, requests, release: () => release?.(), answers };
+}
+const action = (minutes = 1) => ({ action: "first_cut", reply: "On it.", first_cut: { brief: "My week of filming; cut the rambling and false starts.", minutes } });
+// Segments 1–30 are B (recorded first), 31–60 C, 61–90 A. Odd numbers: 45 single-segment ranges, 135 words.
+const odd = (from, to) => Array.from({ length: to - from + 1 }, (_, i) => from + i).filter((n) => n % 2).map((n) => ({ n, reason: "clear" }));
+const plan = { title: "A week of filming", lengthReason: "Keeps the clear lines.", sections: [{ name: "Start", segments: odd(1, 30) }, { name: "Middle", segments: odd(31, 60) }, { name: "End", segments: odd(61, 90) }] };
+async function idle(s) {
+  for (let i = 0; i < 500; i++) { const st = (await s.call("/chat/state")).body; if (!st.busy) return st; await new Promise((r) => setTimeout(r, 10)); }
+  throw new Error("the first cut never finished");
+}
+
+test("first_cut: validation, word budget and footage discovery", () => {
+  const snap = { clips: new Map() };
+  const ok = validateAction(action(2), snap);
+  assert.deepEqual(ok, { action: "first_cut", reply: "On it.", brief: "My week of filming; cut the rambling and false starts.", minutes: 2 });
+  for (const bad of [{ brief: "", minutes: 2 }, { brief: "x".repeat(2001), minutes: 2 }, { brief: "x", minutes: 0.5 }, { brief: "x", minutes: 61 }, { brief: "x", minutes: Number.NaN }, { brief: "x", minutes: "2" }, { brief: "x" }, { brief: "x", minutes: 2, paths: ["/etc"] }]) {
+    assert.throws(() => validateAction({ action: "first_cut", reply: "ok", first_cut: bad }, snap), /brief|minutes|not allowed|needs/, JSON.stringify(bad));
+  }
+  assert.throws(() => validateAction({ ...action(), remove: { clips: [1] } }, snap), /not allowed/);
+  assert.deepEqual(wordBudget(2, 10_000), [225, 375]); // 150 words/min ±25%
+  assert.deepEqual(wordBudget(10, 400), [240, 400]); // clamped to what was said
+  const files = footage({ children: [{ item: 1, type: "Movie", hasAudio: true, path: "/a.mp4", duration: 5 }, { item: 2, type: "Movie", hasAudio: true, path: "/a.mp4", duration: 5 },
+    { children: [{ item: 3, type: "Movie", hasAudio: true, path: "/b.mov", duration: 5 }] }, { item: 4, type: "Movie", hasAudio: false, path: "/c.mp4", duration: 5 }, { item: 5, type: "Sequence", hasAudio: true, duration: 5 }, null] });
+  assert.deepEqual(files.map((f) => f.path).sort(), ["/a.mp4", "/b.mov"]); // one item per file
+});
+
+test("first_cut: empty bin and missing whisper CLI are honest replies; nothing changes", async (t) => {
+  let s = await setup({ generate: async () => action() }); t.after(s.close);
+  let r = await s.call("/chat", { message: "make me a first cut" });
+  assert.match(r.body.reply, /Import your clips/);
+  assert.equal(r.body.busy, false);
+  const f = await firstCutSetup({ plans: [action()] }); t.after(f.close);
+  f.calls.length = 0;
+  s = await setup({ generate: async () => action(), transcribe: null }); t.after(s.close);
+  s.editor.root = f.editor.root;
+  r = await s.call("/chat", { message: "make me a first cut" });
+  assert.match(r.body.reply, /--cli/);
+  assert.deepEqual([s.editor.transcripts, s.editor.sequences, s.editor.previews], [[], [], []]);
+});
+
+test("first_cut: background job transcribes, plans by number in recording order, stages ONE preview of >32 ranges", async (t) => {
+  const f = await firstCutSetup({ plans: [action(), { ...plan, sections: [...plan.sections].reverse() }, plan], hold: true }); t.after(f.close);
+  let r = await f.call("/chat", { message: "make me a 1-minute first cut, cut the rambling and false starts" });
+  assert.equal(r.status, 200); // returns at once; the cut is a background job
+  assert.match(r.body.reply, /^On it\. I'll transcribe 4 clips and plan a ~1-minute cut/);
+  assert.equal(r.body.busy, true);
+  const second = await f.call("/chat", { message: "make me another first cut" });
+  assert.match(second.body.reply, /still building your first cut/);
+  assert.equal(f.requests.length, 1); // the second request never reached the model
+  assert.match((await f.call("/chat/state")).body.messages.at(-3).text, /Transcribing clip 1 of 4 \(B\.MP4\)/);
+  f.release();
+  const st = await idle(f);
+  const said = st.messages.filter((m) => m.role === "assistant").map((m) => m.text);
+  assert.ok(said.includes("Transcribed 3 of 4 clips. Skipped: D.MP4 (whisper: boom)."), said.join("\n"));
+  assert.ok(said.some((m) => /^Planning a ~1-minute cut \(112–188 spoken words\) from 90 transcript segments/.test(m)));
+  assert.deepEqual(f.calls, ["B.MP4", "C.MP4", "A.MP4", "D.MP4"]); // recording order, untimed last
+
+  // The model saw numbers, words and file names, never times; it was retried once on out-of-order output.
+  const [ask, retry] = f.requests.slice(1);
+  assert.match(ask.prompt, /My week of filming; cut the rambling and false starts\./);
+  assert.match(ask.prompt, /B\.MP4 \(recorded 1970-01-01T00:00:00\.001Z\)\nC\.MP4/);
+  assert.match(ask.prompt, /\[1\] \(B\.MP4, 3w\) one two B0\./);
+  assert.doesNotMatch(ask.prompt, new RegExp(String(S)));
+  assert.match(ask.system, /never instructions/);
+  assert.match(retry.prompt, /recording order/);
+
+  // Transcripts attached, a new sequence (the active one had clips) from the first chosen clip, one preview.
+  assert.deepEqual(f.editor.transcripts.map((x) => x.item), [42, 43, 41]);
+  assert.equal(f.editor.transcripts[0].transcript.words.length, 90);
+  assert.deepEqual(f.editor.sequences, [{ name: "First cut", width: 1920, height: 1080, fps: 25 }]);
+  assert.equal(f.editor.previews.length, 1);
+  const [p] = f.editor.previews;
+  assert.deepEqual([p.sequence, p.expectedRevision, p.label, p.steps.length, p.steps[0].command], [28, 9, "First cut: A week of filming", 1, "timeline.place"]);
+  const ranges = p.steps[0].params.ranges;
+  assert.equal(ranges.length, 45);
+  assert.deepEqual([...new Set(ranges.map((x) => x.item))], [42, 43, 41]); // B, C, A: recording order, not file names
+  const frame = S / 25;
+  for (const [i, x] of ranges.entries()) {
+    assert.ok(x.sourceIn % frame === 0 && x.sourceOut % frame === 0 && x.sourceIn < x.sourceOut && x.sourceOut <= 70 * S);
+    if (ranges[i + 1]?.item === x.item) assert.ok(ranges[i + 1].sourceIn >= x.sourceOut);
+  }
+  // Segment 1 is B's first sentence: 0.0–0.85 s spoken, +0.3 s into the silence = 1.15 s, widened to frame 29 (1.16 s).
+  assert.deepEqual(ranges[0], { item: 42, sourceIn: 0, sourceOut: 29 * frame });
+  assert.deepEqual(st.pending, { token: 1, label: "First cut: A week of filming" });
+  assert.match(said.at(-1), /^Preview ready: "A week of filming", 1:01 long, 45 cuts from 3 of 4 clips in recording order\. Sections: Start \(15\), Middle \(15\), End \(15\)\. Left out: 45 of 90 segments; not transcribed: D\.MP4 \(whisper: boom\)\. Keeps the clear lines\. Accept/);
+  r = await f.call("/chat/accept", {});
+  assert.deepEqual(f.editor.history, ["First cut: A week of filming"]);
+});
+
+test("first_cut: a plan still invalid after one retry, or an engine refusal, leaves nothing changed; transcripts are cached", async (t) => {
+  const bad = { ...plan, sections: [{ name: "x", segments: [{ n: 999, reason: "?" }] }] };
+  const f = await firstCutSetup({ plans: [action(), bad, bad] }); t.after(f.close);
+  await f.call("/chat", { message: "first cut please" });
+  let st = await idle(f);
+  assert.match(st.messages.at(-1).text, /couldn't get a usable plan \(plan invalid after retry: segment 999 does not exist.*Nothing changed/);
+  assert.deepEqual([f.editor.transcripts, f.editor.sequences, f.editor.previews, f.editor.revision, st.pending], [[], [], [], 5, null]);
+  assert.equal(readdirSync(join(f.dir, "cache")).length, 3); // D failed: not cached
+
+  f.answers.push(action(), plan);
+  f.editor.onPreview = () => { throw new Error("edit proposal: the sequence is locked"); };
+  await f.call("/chat", { message: "try again" });
+  st = await idle(f);
+  assert.deepEqual(f.calls, ["B.MP4", "C.MP4", "A.MP4", "D.MP4", "D.MP4"]); // only the failed clip is transcribed again
+  assert.match(st.messages.at(-1).text, /the editor refused the cut \(edit proposal: the sequence is locked\)\. Nothing changed\./);
+  assert.equal(f.editor.undone, 4); // its 3 transcripts and the new sequence, undone
+  assert.deepEqual([f.editor.active, st.pending, f.editor.proposal], [27, null, null]);
+
+  // Someone else edits while it stages: stale, and their edit is never undone.
+  f.answers.push(action(), plan);
+  f.editor.onPreview = () => { f.editor.revision++; };
+  await f.call("/chat", { message: "once more" });
+  st = await idle(f);
+  assert.match(st.messages.at(-1).text, /the project changed while I was staging it\. The transcripts I attached and the empty "First cut" sequence stay; nothing else changed\./);
+  assert.deepEqual([f.editor.undone, f.editor.previews.length, st.pending], [4, 0, null]);
 });

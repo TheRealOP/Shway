@@ -7,8 +7,9 @@
 //
 // --download fetches the model (size/licence: `filmcraft-cli exec transcript.models`) into the
 // FilmCraft data dir ($FILMCRAFT_DATA_DIR or ~/Library/Application Support/FilmCraft) first.
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -57,28 +58,36 @@ function args(argv) {
   return o;
 }
 
-function main() {
-  const o = args(process.argv.slice(2));
-  const cli = (...a) => JSON.parse(execFileSync(resolve(o.cli), a, { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"], maxBuffer: 256 << 20 }));
-  if (o.download) cli("exec", "transcript.downloadModel", `model=${o.model}`);
+/**
+ * Transcribe one media file in a separate filmcraft-cli process (never the editor's UI thread), in a
+ * throwaway project. Resolves to a TranscriptInput whose sourceItemId is the given one (default: the temp item).
+ */
+export async function transcribeFile(media, { cli, model = "whisper-base", language = "auto", download = false, sourceItem, log = () => {} }) {
+  const run = async (...a) => JSON.parse((await promisify(execFile)(resolve(cli), a, { encoding: "utf8", maxBuffer: 256 << 20 })).stdout);
+  if (download) await run("exec", "transcript.downloadModel", `model=${model}`);
   const dir = mkdtempSync(join(tmpdir(), "shway-transcribe-"));
   try {
     const project = join(dir, "t.fcproj");
-    const imported = cli("--save-as", project, "import", resolve(o.media));
+    const imported = await run("--save-as", project, "import", resolve(media));
     const id = imported?.items?.[0];
     if (!Number.isSafeInteger(id)) throw new Error(`import failed: ${JSON.stringify(imported?.errors ?? imported)}`);
     const t0 = Date.now();
-    const gen = cli("--project", project, "--save", "exec", "transcript.generate", JSON.stringify({ items: [id], model: o.model, language: o.language, diarize: false }));
-    process.stderr.write(`transcribed in ${((Date.now() - t0) / 1000).toFixed(1)}s: ${JSON.stringify(gen)}\n`);
+    const gen = await run("--project", project, "--save", "exec", "transcript.generate", JSON.stringify({ items: [id], model, language, diarize: false }));
+    log(`transcribed in ${((Date.now() - t0) / 1000).toFixed(1)}s: ${JSON.stringify(gen)}`);
     const saved = JSON.parse(readFileSync(project, "utf8"));
-    const input = toTranscriptInput(saved?.project?.transcripts?.[String(id)], o.sourceItem === undefined ? id : Number(o.sourceItem));
-    const text = JSON.stringify(input, null, 1) + "\n";
-    if (o.out) writeFileSync(o.out, text); else process.stdout.write(text);
+    return toTranscriptInput(saved?.project?.transcripts?.[String(id)], sourceItem ?? id);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
+async function main() {
+  const o = args(process.argv.slice(2));
+  const input = await transcribeFile(o.media, { ...o, sourceItem: o.sourceItem === undefined ? undefined : Number(o.sourceItem), log: (m) => process.stderr.write(m + "\n") });
+  const text = JSON.stringify(input, null, 1) + "\n";
+  if (o.out) writeFileSync(o.out, text); else process.stdout.write(text);
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  try { main(); } catch (e) { process.stderr.write(`transcribe-local: ${e.message}\n`); process.exit(1); }
+  main().catch((e) => { process.stderr.write(`transcribe-local: ${e.message}\n`); process.exit(1); });
 }

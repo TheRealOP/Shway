@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Chat with the AI that edits your video in the Shway desktop editor. Node ≥ 23 (imports .ts), no packages.
 //   node shway/assistant.mjs [--port 8793] [--editor 127.0.0.1:9876] [--proxy http://127.0.0.1:8790] [--takes takes.json] [--camera [index]]
-// Each message becomes ONE schema-validated action (answer | remove | trim | move | replace_take | transition), mapped
+//        [--cli target/release/filmcraft-cli]   (built with --features whisper: lets first_cut transcribe the bin's clips)
+// Each message becomes ONE schema-validated action (answer | first_cut | remove | trim | move | replace_take | transition), mapped
 // to engine params here. Edits are staged with proposal.preview (expectedRevision) and only applied by
 // POST /chat/accept (proposal.commit: one undo step). The editor runs `filmcraft --control <port>`;
 // Gemini (and Jev for take choices) go through shway/gemini-server.mjs, which holds the keys.
@@ -9,15 +10,18 @@
 import { execFileSync, spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { connect } from "node:net";
-import { appendFileSync, readFileSync, statSync, unlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
+import { appendFileSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { createInterface } from "node:readline";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { allowedOrigin, MAX_IMAGE_BYTES } from "./gemini-server.mjs";
 import { AdapterError, ShwayAdapter, binItem } from "./adapter.ts";
 import { geminiGenerate, jevDecide, proposeReplacement } from "./replace.ts";
 import { transitionFrames } from "./preview.mjs";
+import { chronological, clampRange, planCut, recordedAt, segment, toRanges } from "./longform.mjs";
+import { toTranscriptInput, transcribeFile } from "./transcribe-local.mjs";
 import { createRecognizer } from "../surface/gestures/recognizer.mjs";
 import { createBridge, createInk } from "../surface/gestures/bridge.mjs";
 
@@ -30,6 +34,8 @@ const MAX_PREVIEW = 200 * 1024; // base64 camera preview, the editor's cap (ui-e
 const MAX_MESSAGES = 200; // ponytail: in-memory, lost on restart; persist per project if creators need history
 const MAX_LINE = 64 * 1024 * 1024;
 const MAX_CLIP_TEXT = 600;
+const LONG_MS = 10 * 60_000; // first-cut calls: transcript.set of long clips, a preview of hundreds of ranges
+const WORDS_PER_MINUTE = 150;
 
 /** JSON-lines control client (docs/control-protocol.md): one connection per request, so a dropped editor just errors. */
 export function controlTransport(address, timeoutMs = 20_000) {
@@ -62,8 +68,9 @@ const obj = (properties) => ({ type: "OBJECT", properties, required: Object.keys
 export const SCHEMA = {
   type: "OBJECT",
   properties: {
-    action: { type: "STRING", enum: ["answer", "remove", "trim", "move", "replace_take", "transition", "zoom", "edit", "navigate"] },
+    action: { type: "STRING", enum: ["answer", "first_cut", "remove", "trim", "move", "replace_take", "transition", "zoom", "edit", "navigate"] },
     reply: { type: "STRING" },
+    first_cut: obj({ brief: { type: "STRING" }, minutes: { type: "NUMBER" } }),
     remove: obj({ clips: { type: "ARRAY", items: { type: "INTEGER" } } }),
     trim: obj({ clip: { type: "INTEGER" }, edge: { type: "STRING", enum: ["in", "out"] }, direction: { type: "STRING", enum: ["shorten", "extend"] },
       amount: { type: "NUMBER" }, unit: { type: "STRING", enum: ["frames", "seconds"] } }),
@@ -77,12 +84,13 @@ export const SCHEMA = {
   required: ["action", "reply"],
 };
 const FIELDS = {
-  answer: [], remove: ["clips"], trim: ["clip", "edge", "direction", "amount", "unit"],
+  answer: [], first_cut: ["brief", "minutes"], remove: ["clips"], trim: ["clip", "edge", "direction", "amount", "unit"],
   move: ["clip", "target", "position"], replace_take: ["correction"], transition: ["from", "to", "effect", "direction"], zoom: ["clip", "region", "factor"], edit: ["steps"], navigate: ["operation", "value"],
 };
 const SYSTEM = `You are the editing assistant inside the Shway video editor. A creator chats with you about the edit of their video.
 Pick exactly ONE action and fill only that action's fields:
 - answer: reply only (questions about the edit, what is said in a clip, or anything you cannot do).
+- first_cut: build a first cut / rough cut / assembly from ALL the footage in the project bin (transcribed, chosen and placed by code in recording order). first_cut.brief = the creator's goals in their own words (subject, tone, what to cut such as rambling or false starts); first_cut.minutes = target length in minutes, 1–60 (3 if they don't say).
 - remove: remove.clips = ids of the clips to delete from the timeline (ripple delete; linked audio goes with its video).
 - trim: trim.clip = one clip id; trim.edge "in" (its start) or "out" (its end); trim.direction "shorten" or "extend"; trim.amount with trim.unit "frames" or "seconds".
 - move: move.clip = the clip to move; move.target = the clip to put it next to; move.position "before" or "after" the target.
@@ -167,6 +175,11 @@ export function validateAction(raw, snap, sketch = null) {
   };
   switch (raw.action) {
     case "answer": return { action: "answer", reply };
+    case "first_cut": {
+      if (typeof raw.brief !== "string" || !raw.brief.trim() || raw.brief.length > 2000) throw new UserError("brief must be 1–2000 characters");
+      if (typeof raw.minutes !== "number" || !Number.isFinite(raw.minutes) || raw.minutes < 1 || raw.minutes > 60) throw new UserError("minutes must be a number from 1 to 60");
+      return { action: "first_cut", reply, brief: raw.brief.trim(), minutes: raw.minutes };
+    }
     case "remove": {
       if (!Array.isArray(raw.clips) || raw.clips.length < 1 || raw.clips.length > 32 || new Set(raw.clips).size !== raw.clips.length) throw new UserError("clips must list 1–32 distinct clip ids");
       return { action: "remove", reply, clips: raw.clips.map((id) => clip(id, "clip").clip) };
@@ -243,12 +256,41 @@ export function validateAction(raw, snap, sketch = null) {
   }
 }
 
-/** @param {{editor?: string, proxy?: string, takes?: unknown[] | null, transport?: object}} opts */
-export function createAssistant({ editor = "127.0.0.1:9876", proxy = "http://127.0.0.1:8790", takes = null, transport = controlTransport(editor), sketch: cameraInk = null } = {}) {
+/** Spoken words for a cut of `minutes`: ~150 words/min ±25%, clamped to the words that exist. [min, max] */
+export function wordBudget(minutes, available) {
+  const words = minutes * WORDS_PER_MINUTE, hi = Math.max(1, Math.min(Math.round(words * 1.25), available));
+  return [Math.max(1, Math.min(Math.round(words * 0.75), Math.floor(hi * 0.6))), hi];
+}
+
+/** Recorded movie items with sound in project.inspect's bin tree (bounded walk), one per file. */
+export function footage(root) {
+  const out = new Map(), stack = [root];
+  for (let visited = 0; stack.length && visited < 100_000; visited++) {
+    const n = stack.pop();
+    if (!isObj(n)) continue;
+    if (Array.isArray(n.children)) stack.push(...n.children.slice(0, 100_000));
+    if (n.type === "Movie" && n.hasAudio === true && typeof n.path === "string" && n.path && Number.isSafeInteger(n.item) && Number.isSafeInteger(n.duration) && n.duration > 0 && !out.has(n.path)) out.set(n.path, n);
+  }
+  return [...out.values()];
+}
+
+/** FilmCraft's data dir (engine autosave.rs default_data_dir), where transcripts are cached. */
+function dataDir() {
+  if (process.env.FILMCRAFT_DATA_DIR) return process.env.FILMCRAFT_DATA_DIR;
+  if (process.platform === "darwin") return join(homedir(), "Library/Application Support/FilmCraft");
+  if (process.platform === "win32") return join(process.env.APPDATA ?? homedir(), "FilmCraft");
+  return process.env.XDG_DATA_HOME ? join(process.env.XDG_DATA_HOME, "filmcraft") : join(homedir(), ".local/share/filmcraft");
+}
+
+const clock = (ticks) => { const t = Math.round(ticks / TPS); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}`; };
+
+/** @param {{editor?: string, proxy?: string, takes?: unknown[] | null, transport?: object, cli?: string | null}} opts */
+export function createAssistant({ editor = "127.0.0.1:9876", proxy = "http://127.0.0.1:8790", takes = null, transport = controlTransport(editor), sketch: cameraInk = null,
+  cli = null, generate = geminiGenerate(proxy), transcribe = cli ? (path) => transcribeFile(path, { cli }) : null,
+  longTransport = controlTransport(editor, LONG_MS), cacheDir = join(dataDir(), "shway-transcripts"), timeOf = recordedAt } = {}) {
   const messages = [];
-  let pending = null, pendingInk = null, renderedPreview = null, busy = false, adapter = null;
-  const generate = geminiGenerate(proxy);
-  const say = (role, text) => { messages.push({ role, text }); if (messages.length > MAX_MESSAGES) messages.splice(0, messages.length - MAX_MESSAGES); };
+  let pending = null, pendingInk = null, renderedPreview = null, busy = false, adapter = null, job = null;
+  const say = (role, text) => { const m = { role, text }; messages.push(m); if (messages.length > MAX_MESSAGES) messages.splice(0, messages.length - MAX_MESSAGES); return m; };
   const getAdapter = async () => (adapter ??= await ShwayAdapter.connect(transport));
   const stale = (e) => (e instanceof AdapterError && e.code === "stale") || /stale/i.test(String(e?.message));
 
@@ -261,7 +303,7 @@ export function createAssistant({ editor = "127.0.0.1:9876", proxy = "http://127
     let error = "";
     for (let attempt = 0; attempt < 2; attempt++) {
       const schema = sketch ? SCHEMA : { ...SCHEMA, properties: { ...SCHEMA.properties,
-        action: { type: "STRING", enum: ["answer", "remove", "trim", "move", "replace_take", "transition", "edit", "navigate"] } } };
+        action: { type: "STRING", enum: ["answer", "first_cut", "remove", "trim", "move", "replace_take", "transition", "edit", "navigate"] } } };
       const raw = await generate({
         prompt: prompt + (sketch ? "\nSTROKES (JSON, ordered, full frame 0–1): " + JSON.stringify(sketch.strokes) : ""),
         system, schema, ...(sketch ? { model: SKETCH_MODEL, images: sketch.images } : {}),
@@ -331,6 +373,7 @@ export function createAssistant({ editor = "127.0.0.1:9876", proxy = "http://127
     };
     switch (act.action) {
       case "answer": return act.reply;
+      case "first_cut": return startFirstCut(act, snap);
       case "remove":
         return stage(`Remove ${act.clips.map(name).join(", ")}`, { command: "timeline.remove", params: { clips: act.clips } });
       case "move":
@@ -377,6 +420,92 @@ export function createAssistant({ editor = "127.0.0.1:9876", proxy = "http://127
         pending = { token: r.token, label: r.label, ...(sketch ? { sketch: true } : {}) };
         return `${r.explanation || act.reply} Preview ready: accept to apply it, or reject.`;
       }
+    }
+  }
+
+  // ---- First cut (DEV-90): transcribe the bin out of process, plan by segment number, stage ONE preview.
+  // Runs as a background job (the panel's HTTP read times out at 120 s); progress and the result go to `messages`.
+  function startFirstCut({ reply, brief, minutes }, snap) {
+    const clips = footage(snap.project.root);
+    if (!clips.length) return "There's no footage with sound in the project yet. Import your clips (File ▸ Import), then ask again. Nothing changed.";
+    if (!transcribe) return "I can't transcribe your clips: start the assistant with --cli pointing at a filmcraft-cli built with --features whisper. Nothing changed.";
+    job = firstCut(brief, minutes, clips).catch((e) => {
+      say("assistant", e instanceof UserError ? e.message : stale(e) ? "The project changed while I was building the first cut, so I stopped. Nothing changed. Ask again when you're ready."
+        : `Something went wrong building the first cut (${cut(String(e?.message ?? e), 300)}). Nothing changed.`);
+    }).finally(() => { job = null; });
+    return `${reply} I'll transcribe ${clips.length} clip${clips.length === 1 ? "" : "s"} and plan a ~${minutes}-minute cut; progress shows here and it can take a few minutes.`;
+  }
+
+  /** A clip's word-timed transcript (TranscriptInput, ticks), cached by path + size + mtime. */
+  async function transcriptOf(clip) {
+    const st = statSync(clip.path);
+    const file = join(cacheDir, createHash("sha256").update(`${clip.path}\0${st.size}\0${st.mtimeMs}`).digest("hex") + ".json");
+    // Words past the source end (Whisper rounding) would make transcript.set refuse the whole clip.
+    const input = (t) => toTranscriptInput({ language: t?.language, words: Array.isArray(t?.words) ? t.words.filter((w) => w?.end <= clip.duration) : t?.words }, clip.item);
+    try { return input(JSON.parse(readFileSync(file, "utf8"))); } catch { /* not cached, or unreadable: transcribe again */ }
+    const checked = input(await transcribe(clip.path));
+    try { mkdirSync(cacheDir, { recursive: true }); writeFileSync(file, JSON.stringify({ language: checked.language, words: checked.words })); } catch { /* cache is best effort */ }
+    return checked;
+  }
+
+  async function firstCut(brief, minutes, sources) {
+    const a = await ShwayAdapter.connect(longTransport);
+    // ponytail: recordedAt runs ffprobe synchronously (~0.1 s a clip), briefly stalling /chat/state; make it async if bins get large.
+    const time = new Map(sources.map((c) => [c.path, timeOf(c.path)]));
+    const clips = chronological(sources.map((c) => c.path), (p) => time.get(p)).map((p) => sources.find((c) => c.path === p));
+    const name = (c) => basename(c.path);
+    const done = [], skipped = [];
+    const note = say("assistant", `Transcribing ${clips.length} clip${clips.length === 1 ? "" : "s"}…`);
+    for (const [i, c] of clips.entries()) {
+      note.text = `Transcribing clip ${i + 1} of ${clips.length} (${name(c)})…`;
+      try { done.push({ ...c, transcript: await transcriptOf(c) }); } catch (e) { skipped.push(`${name(c)} (${cut(String(e?.message ?? e).split("\n")[0], 120)})`); }
+    }
+    note.text = `Transcribed ${done.length} of ${clips.length} clips.` + (skipped.length ? ` Skipped: ${skipped.join("; ")}.` : "");
+    // Segment numbers are the recording order: the model picks numbers, code supplies every time.
+    const segments = done.flatMap((c) => segment(c.item, c.transcript.words).map((x) => ({ ...x, file: name(c), recordedAt: time.get(c.path) == null ? null : new Date(time.get(c.path)).toISOString() })));
+    if (!segments.length) throw new UserError(`I couldn't find any speech to cut from${skipped.length ? ` (skipped ${skipped.join("; ")})` : ""}. Nothing changed.`);
+    const words = wordBudget(minutes, segments.reduce((n, x) => n + x.text.split(/\s+/).filter(Boolean).length, 0));
+    say("assistant", `Planning a ~${minutes}-minute cut (${words[0]}–${words[1]} spoken words) from ${segments.length} transcript segments…`);
+    let plan;
+    try { ({ plan } = await planCut({ segments, brief, words, generate })); } catch (e) {
+      if (/^plan invalid/.test(e?.message)) throw new UserError(`I couldn't get a usable plan (${cut(e.message, 300)}). Nothing changed; try again or change the brief.`);
+      throw e;
+    }
+    const ranges = toRanges(plan, segments);
+
+    // Edits from here on are ours: transcripts, maybe a new sequence, then the one preview. If staging
+    // fails, undo exactly those edits (only while nobody else has edited since).
+    let edits = 0, after = null, made = false;
+    try {
+      for (const c of done) { await a.importTranscript(c.transcript); edits++; }
+      let { project, sequence } = await a.inspect();
+      if (!sequence || [...sequence.video, ...sequence.audio].some((t) => t.items.length)) {
+        const first = done.find((c) => c.item === ranges[0].clip);
+        await longTransport.execute("file.newSequence", { name: "First cut", ...(first.width && first.height ? { width: first.width, height: first.height } : {}),
+          ...(first.frameRate?.num > 0 && first.frameRate?.den > 0 ? { fps: first.frameRate.num / first.frameRate.den } : {}) });
+        edits++; made = true;
+        ({ project, sequence } = await a.inspect());
+      }
+      after = project.revision;
+      const rate = sequence.settings?.frame_rate;
+      const placed = ranges.map((x) => clampRange({ item: x.clip, sourceIn: x.sourceIn, sourceOut: x.sourceOut }, rate, done.find((c) => c.item === x.clip).duration)).filter(Boolean);
+      const title = typeof plan.title === "string" ? plan.title.trim() : "First cut";
+      const preview = await a.preview({ expectedRevision: project.revision, sequence: sequence.id, label: fit(`First cut: ${title}`), steps: [{ command: "timeline.place", params: { ranges: placed } }] });
+      pending = { token: preview.token, label: preview.label };
+      const length = placed.reduce((n, x) => n + x.sourceOut - x.sourceIn, 0);
+      const used = new Set(ranges.map((x) => x.clip)), chosen = ranges.reduce((n, x) => n + x.segs.length, 0);
+      const unused = done.filter((c) => !used.has(c.item)).map(name);
+      say("assistant", [`Preview ready: "${title}", ${clock(length)} long, ${placed.length} cuts from ${used.size} of ${clips.length} clips in recording order.`,
+        `Sections: ${plan.sections.map((x) => `${cut(x.name, 60)} (${x.segments.length})`).join(", ")}.`,
+        `Left out: ${segments.length - chosen} of ${segments.length} segments${unused.length ? `, all of ${unused.join(", ")}` : ""}${skipped.length ? `; not transcribed: ${skipped.join("; ")}` : ""}.`,
+        typeof plan.lengthReason === "string" && plan.lengthReason.trim() ? cut(plan.lengthReason.trim(), 300) : "",
+        "Accept to apply it as one undo step, or reject."].filter(Boolean).join(" "));
+    } catch (e) {
+      const now = await a.inspect().catch(() => null);
+      const mine = edits && after != null && now?.project.revision === after;
+      if (mine) for (let i = 0; i < edits; i++) await a.undo();
+      const why = stale(e) ? "the project changed while I was staging it" : e instanceof EditorError || (e instanceof AdapterError && e.code === "invalid") ? `the editor refused the cut (${cut(e.message, 300)})` : `of an error (${cut(String(e?.message ?? e), 300)})`;
+      throw new UserError(`I couldn't stage the first cut because ${why}. ` + (!edits || mine ? "Nothing changed." : `The transcripts I attached${made ? ' and the empty "First cut" sequence' : ""} stay; nothing else changed.`));
     }
   }
 
@@ -510,7 +639,7 @@ export function createAssistant({ editor = "127.0.0.1:9876", proxy = "http://127
       res.writeHead(status, { "content-type": "application/json", ...(origin && allowedOrigin(origin) ? { "access-control-allow-origin": origin, vary: "origin" } : {}) });
       res.end(JSON.stringify(value));
     };
-    const state = () => ({ pending, busy });
+    const state = () => ({ pending, busy: busy || job !== null });
     try {
       if (!allowedOrigin(origin)) throw new HttpError(403, "origin not allowed");
       if (req.method === "OPTIONS") {
@@ -555,7 +684,8 @@ export function createAssistant({ editor = "127.0.0.1:9876", proxy = "http://127
         if (route === "/chat" || route === "/review/note") {
           const message = route === "/chat" ? body.message.trim() : await reviewMessage(body);
           say("user", message);
-          try { reply = await chat(message, route === "/review/note" ? body.moment : undefined); } catch (e) {
+          if (job) reply = "I'm still building your first cut, so I didn't act on that. I'll post here when the preview is ready.";
+          else try { reply = await chat(message, route === "/review/note" ? body.moment : undefined); } catch (e) {
             if (e instanceof HttpError) { say("assistant", e.message); throw e; }
             if (e instanceof UserError) reply = e.message;
             else if (stale(e)) reply = "The project changed while I was working on that, so nothing changed. Please send it again.";
@@ -702,10 +832,11 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const takes = takesFile ? JSON.parse(readFileSync(takesFile, "utf8")) : null;
   const editor = arg("--editor", "127.0.0.1:9876"), camera = process.argv.indexOf("--camera");
   const sketch = camera > 0 ? createInk() : null; // the camera draws it, the sketch path reads and clears it
-  const opts = { editor, proxy: arg("--proxy", "http://127.0.0.1:8790"), takes, transport: controlTransport(editor), sketch };
+  const cli = arg("--cli", null);
+  const opts = { editor, proxy: arg("--proxy", "http://127.0.0.1:8790"), takes, transport: controlTransport(editor), sketch, cli: cli && resolve(cli) };
   const app = createAssistant(opts);
   app.listen(port, "127.0.0.1", () => {
-    console.log(`Shway assistant on http://127.0.0.1:${port} (editor ${opts.editor}, proxy ${opts.proxy}${takes ? `, ${takes.length} takes` : ""}${camera > 0 ? ", camera" : ""})`);
+    console.log(`Shway assistant on http://127.0.0.1:${port} (editor ${opts.editor}, proxy ${opts.proxy}${takes ? `, ${takes.length} takes` : ""}${camera > 0 ? ", camera" : ""}${cli ? `, whisper ${opts.cli}` : ", no --cli: first cuts need it"})`);
   });
   if (camera > 0) startCamera(opts.transport, { ink: sketch, onInk: app.updateInk, args: /^\d+$/.test(process.argv[camera + 1] ?? "") ? [process.argv[camera + 1]] : [] });
 }

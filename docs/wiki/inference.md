@@ -61,6 +61,17 @@ one `undo` ("AI first cut") restored the empty sequence. Not verified: real crea
 export of the cut, and brief-driven duration limits (the model sees `durationSeconds` but nothing
 enforces it).
 
+**Chat first cut (DEV-90, 2026-10-11 — implemented, fake-tested; live run unverified):** the desktop
+Assistant's `first_cut{brief, minutes}` action (`shway/assistant.mjs`) runs as a background job:
+out-of-process Whisper per bin clip (`transcribeFile`, cached by path + size + mtime), `longform.mjs`
+segments numbered in recording order, `planCut` with the creator's brief and a 150 words/min ±25%
+budget, `toRanges` + `clampRange` from word timestamps, transcripts attached with `transcript.set`, an
+optional "First cut" sequence, and ONE `timeline.place` preview (engine cap 512 ranges). Verified only by
+`shway/assistant.test.mjs` (fake editor, fake transcriber, fake model: recording order kept against an
+out-of-order plan, progress messages, a 45-range single preview, failures leave nothing changed, a
+second request refused while running) and the Rust 100/513-range test. Not verified: a live run on real
+footage with Gemini and whisper.
+
 ## TRIBE flow
 
 Tabled for the hackathon (October 11, 2026): too slow for the time left. See [Decisions](decisions.md).

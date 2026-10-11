@@ -302,6 +302,38 @@ fn cumulative_target_references_are_bounded_before_parsing() {
 }
 
 #[test]
+fn a_first_cut_of_more_than_32_ranges_is_one_preview_and_one_undo_step() {
+    let (mut s, a, _, f) = assembly_fixture();
+    // project.inspect tells an agent which bin items have audio and their picture format.
+    let mut stack = vec![s.execute("project.inspect", json!({})).unwrap()["root"].clone()];
+    let entry = loop {
+        let node = stack.pop().unwrap();
+        if node["item"] == json!(a) {
+            break node;
+        }
+        stack.extend(node["children"].as_array().cloned().unwrap_or_default());
+    };
+    assert_eq!((entry["hasAudio"].clone(), entry["frameRate"]["num"].is_i64()), (json!(true), true));
+    assert!(entry["width"].as_u64().unwrap() > 0 && entry["height"].as_u64().unwrap() > 0);
+    let undo = s.history.undo.len();
+    let ranges: Vec<Value> = (0..100).map(|i| json!({"item":a,"sourceIn":(i % 20) * f,"sourceOut":(i % 20 + 1) * f})).collect();
+    let p = assemble(&s, json!(ranges));
+    let token = run(&mut s, p);
+    s.execute("proposal.commit", json!({"token":token})).unwrap();
+    assert_eq!(s.history.undo.len(), undo + 1);
+    assert_eq!(s.active_sequence().unwrap().duration().0, 100 * f);
+    // 513 ranges are refused before parsing, split over steps or not; other targets keep their 32.
+    let range = json!({"item":a,"sourceIn":0,"sourceOut":f});
+    let mut split = assemble(&s, json!(vec![range.clone(); 500]));
+    split["steps"] = json!([split["steps"][0].clone(), {"command":"timeline.place","params":{"ranges":vec![range.clone(); 13]}}]);
+    for p in [assemble(&s, json!(vec![range; 513])), split] {
+        let error = s.execute("proposal.preview", p).unwrap_err();
+        assert!(error.to_string().contains("512 source ranges"), "{error}");
+        assert!(s.proposal.is_none());
+    }
+}
+
+#[test]
 fn hostile_source_marks_are_rejected_before_inherited_range_arithmetic() {
     let (mut s, clip, source, _) = fixture();
     s.edit("Corrupt source marks fixture", |p, _| {
@@ -460,7 +492,7 @@ fn hostile_assembly_ranges_are_rejected_without_a_candidate() {
         ("sequence item", assemble(&s, json!([range(seq, 0, f)]))),
         ("unknown field", assemble(&s, json!([{"item":a,"sourceIn":0,"sourceOut":f,"speed":2}]))),
         ("empty", assemble(&s, json!([]))),
-        ("too many", assemble(&s, json!(vec![range(a, 0, f); 33]))),
+        ("too many", assemble(&s, json!(vec![range(a, 0, f); 513]))),
     ];
     let mut stale = assemble(&s, json!([range(a, 0, f)]));
     stale["expectedRevision"] = json!(s.revision - 1);
@@ -479,7 +511,7 @@ fn hostile_assembly_ranges_are_rejected_without_a_candidate() {
             "zero item" => "positive exact browser integers",
             "sequence item" => "only finite media",
             "empty" => "at least one source range",
-            "too many" => "32 explicit target references",
+            "too many" => "512 source ranges",
             _ => "stale revision",
         };
         assert!(error.contains(expected), "{name}: {error}");
