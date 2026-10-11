@@ -52,8 +52,8 @@ impl Driver {
 #[test]
 fn ink_set_paints_and_round_trips() {
     let mut d = Driver::demo();
-    let ink = d.set_ink(json!({"pointer": [0.5, 0.5], "drawing": true, "strokes": [[[0.2, 0.2], [0.5, 0.6], [0.8, 0.3]]]}));
-    assert_eq!(ink, Ink { pointer: Some([0.5, 0.5]), drawing: true, strokes: vec![vec![[0.2, 0.2], [0.5, 0.6], [0.8, 0.3]]] });
+    let ink = d.set_ink(json!({"pointer": [0.5, 0.5], "drawing": true, "scrub": true, "strokes": [[[0.2, 0.2], [0.5, 0.6], [0.8, 0.3]]]}));
+    assert_eq!(ink, Ink { pointer: Some([0.5, 0.5]), drawing: true, scrub: true, strokes: vec![vec![[0.2, 0.2], [0.5, 0.6], [0.8, 0.3]]] });
     assert_eq!(serde_json::from_value::<Ink>(serde_json::to_value(&ink).unwrap()).unwrap(), ink);
 
     // absent keys are kept; a pointer update leaves the strokes alone
@@ -72,7 +72,7 @@ fn hostile_ink_payloads_are_dropped_not_errors() {
         "drawing": "yes",
         "strokes": [[[0.1, 0.1], [-0.1, 0.5], [0.5], [0.5, 0.5, 0.5], ["a", 0.2], null, [1e39, 0.5], [0.3, 0.3]], "nope", [], [[2, 2]]],
     }));
-    assert_eq!(ink, Ink { pointer: None, drawing: false, strokes: vec![vec![[0.1, 0.1], [0.3, 0.3]]] });
+    assert_eq!(ink, Ink { pointer: None, drawing: false, scrub: false, strokes: vec![vec![[0.1, 0.1], [0.3, 0.3]]] });
 
     // `ink` that is not an object (or null) is ignored; fields of the wrong type clear that field
     let before = ink;
