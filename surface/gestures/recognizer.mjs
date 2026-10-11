@@ -18,7 +18,7 @@
  *   fine?: boolean,      // fine (frame-step) mode modifier held
  *   cancel?: boolean,    // cancel pressed this frame
  * }} Frame
- * @typedef {{type: "engage" | "release" | "cancel" | "tracking-lost" | "chop" | "pause" | "pen-down" | "pen-up", t: number}
+ * @typedef {{type: "engage" | "release" | "cancel" | "tracking-lost" | "chop" | "erase" | "pause" | "pen-down" | "pen-up", t: number}
  *   | {type: "shuttle", t: number, rate: number}
  *   | {type: "step", t: number, frames: number}
  *   | {type: "swipe", t: number, direction: "left" | "right"}
@@ -64,7 +64,25 @@ export const DEFAULTS = {
   chopBladeMax: 0.6, // knuckle line's share facing the camera: below = hand edge-on (a blade)
   fingerStraight: 1.5, // fingertip reaches this × its knuckle's distance from the wrist
   chopCooldownMs: 1000,
+  waveMinLeg: 0.06, // open-palm wave = erase: each side-to-side leg moves the palm this share of the image width
+  waveLegs: 3, // legs (left-right-left) within waveWindowMs
+  waveWindowMs: 900, // short, so a swipe and a swipe back a second later are not a wave
 };
+
+/** Side-to-side legs of at least `leg` in a run of palm x samples (direction reversals + 1). */
+function waveLegs(/** @type {{x: number}[]} */ s, /** @type {number} */ leg) {
+  let legs = 0, dir = 0, lo = Infinity, hi = -Infinity, ext = 0;
+  for (const { x } of s) {
+    if (dir === 0) { // first leg: from the lowest or highest point so far
+      lo = Math.min(lo, x);
+      hi = Math.max(hi, x);
+      dir = x - lo >= leg ? 1 : hi - x >= leg ? -1 : 0;
+      if (dir) { legs = 1; ext = x; }
+    } else if ((x - ext) * dir > 0) ext = x; // still going the same way
+    else if (Math.abs(x - ext) >= leg) { dir = -dir; legs++; ext = x; } // reversed far enough
+  }
+  return legs;
+}
 
 const WRIST = 0, THUMB_TIP = 4, INDEX_MCP = 5, INDEX_TIP = 8, MIDDLE_MCP = 9, MIDDLE_TIP = 12, RING_TIP = 16, PINKY_MCP = 17;
 const FINGERS = [[5, 8], [9, 12], [13, 16], [17, 20]]; // [knuckle, tip]
@@ -154,6 +172,7 @@ export function createRecognizer(config = {}) {
   let detent = 0;
   let cooldownUntil = -Infinity;
   /** @type {{t: number, x: number, y: number, tipX: number, tipY: number, palm: number, blade: boolean}[]} */ let track = [];
+  /** @type {{t: number, x: number}[]} */ let wave = []; // open-palm x, for the erase wave
   let tapping = false; // thumb–index closed
   let tapStart = -Infinity;
   let lastTap = -Infinity; // end of a single tap awaiting its pair
@@ -326,6 +345,7 @@ export function createRecognizer(config = {}) {
     }
     if (!h || engage) {
       if (engage) track = []; // a dropped frame mid-flick (motion blur) keeps the window
+      wave = [];
       lastTap = -Infinity;
       lift();
       pointer = sentPointer = null;
@@ -383,13 +403,25 @@ export function createRecognizer(config = {}) {
         return out;
       }
     } else fistSince = -Infinity;
+    const x = (w[WRIST].x + w[INDEX_MCP].x + w[PINKY_MCP].x) / 3;
+    const y = (w[WRIST].y + w[INDEX_MCP].y + w[PINKY_MCP].y) / 3;
+    // Open-palm wave erases the sketch, drawing or not.
+    if (pose === "open") {
+      wave.push({ t, x });
+      wave = wave.filter((s) => s.t >= t - c.waveWindowMs);
+      if (t >= cooldownUntil && waveLegs(wave, c.waveMinLeg) >= c.waveLegs) {
+        out.push({ type: "erase", t });
+        cooldownUntil = t + c.swipeCooldownMs;
+        wave = [];
+        track = [];
+        return out;
+      }
+    } else wave = [];
     // Swipe and chop need an open hand: pointing, fists, drawing and other poses never fire them.
     if (pose !== "open" || drawing) {
       track = [];
       return out;
     }
-    const x = (w[WRIST].x + w[INDEX_MCP].x + w[PINKY_MCP].x) / 3;
-    const y = (w[WRIST].y + w[INDEX_MCP].y + w[PINKY_MCP].y) / 3;
     // Fingertips, not the palm: a wrist flick swings the fingers while the palm barely moves.
     const tipX = (w[INDEX_TIP].x + w[MIDDLE_TIP].x) / 2 * c.aspect;
     const tipY = (w[INDEX_TIP].y + w[MIDDLE_TIP].y) / 2;

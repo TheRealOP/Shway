@@ -82,12 +82,17 @@ def main():
     landmarker = vision.HandLandmarker.create_from_options(vision.HandLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=model_path()),
         running_mode=vision.RunningMode.VIDEO, num_hands=1))
-    t0, last_ms, last_preview = time.monotonic(), -1, 0.0
+    t0, last_ms, last_preview, last_ok = time.monotonic(), -1, 0.0, time.monotonic()
     while True:
         ok, frame = cap.read()
-        if not ok:
-            fail(f"camera {index} stopped delivering frames")
         now = time.monotonic()
+        if not ok:
+            # macOS drops frames while the camera (re)configures, e.g. right after permission is granted
+            if now - last_ok > 3:
+                fail(f"camera {index} stopped delivering frames")
+            time.sleep(0.05)
+            continue
+        last_ok = now
         ms = max(last_ms + 1, int((now - t0) * 1000))  # detect_for_video needs strictly increasing timestamps
         last_ms = ms
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)

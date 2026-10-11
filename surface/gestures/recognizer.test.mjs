@@ -468,3 +468,10 @@ for (const name of recorded) {
     if (name.startsWith("rest")) assert.deepEqual(evs, [], "resting traces must not trigger anything");
   });
 }
+
+test("an open-palm wave (left-right-left) erases once and never swipes", () => {
+  const wave = frames(0, 700, (p) => ({ hand: hand({ x: 0.5 + 0.05 * Math.sign(Math.sin(p * 3.5 * Math.PI)) * Math.min(1, Math.abs(Math.sin(p * 3.5 * Math.PI)) * 3) }) }));
+  const evs = replay([...frames(-300, 270, () => ({ hand: hand({ x: 0.5 }) })), ...wave]);
+  assert.deepEqual(types(evs), ["erase"]);
+  assert.deepEqual(replay(frames(0, 700, (p) => ({ hand: hand({ pose: "point", x: 0.5 + 0.05 * Math.sin(p * 3.5 * Math.PI) }) }))).filter((e) => e.type === "erase"), []);
+});

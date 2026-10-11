@@ -83,7 +83,7 @@ export function createInk() {
   let drawing = false, pen = false;
   const clear = () => { strokes = []; drawing = pen = false; return true; };
   return {
-    /** Applies one recognizer event; true when the ink changed. A new drawing replaces the old sketch; cancel (Esc) clears it. */
+    /** Applies one recognizer event; true when the ink changed. A new drawing replaces the old sketch; an open-palm wave (erase) wipes it; cancel (Esc) clears it. */
     event(/** @type {any} */ e) {
       switch (e?.type) {
         case "pointer": {
@@ -100,6 +100,7 @@ export function createInk() {
         case "pen-up": pen = false; return false;
         case "draw-toggle": drawing = e.drawing === true; pen = false; if (drawing) strokes = []; return true;
         case "cancel": return clear();
+        case "erase": strokes = []; pen = false; return true; // the wave: wipe the sketch, drawing stays as it was
         default: return false;
       }
     },

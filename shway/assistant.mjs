@@ -9,7 +9,7 @@
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { connect } from "node:net";
-import { readFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,6 +21,7 @@ import { createRecognizer } from "../surface/gestures/recognizer.mjs";
 
 const TPS = 254016000000;
 const MAX_BODY = 64 * 1024;
+const TRACE = process.env.SHWAY_TRACE;
 const MAX_PREVIEW = 200 * 1024; // base64 camera preview, the editor's cap (ui-egui camera.rs)
 const MAX_MESSAGES = 200; // ponytail: in-memory, lost on restart; persist per project if creators need history
 const MAX_LINE = 64 * 1024 * 1024;
@@ -427,6 +428,7 @@ export function createCamera(transport, { connect = () => ShwayAdapter.connect(t
     let changed = false;
     for (const e of recognizer.step({ t, hand })) {
       changed = ink.event(e) || changed;
+      if (TRACE && e.type !== "pointer") log(`gesture: ${JSON.stringify(e)}`);
       if (TRANSPORT.has(e.type)) toBridge(e);
     }
     if (ink.visible(recognizer.view().pointer !== null) || changed) sendInk(ink.state());
@@ -446,7 +448,8 @@ export function createCamera(transport, { connect = () => ShwayAdapter.connect(t
 export function startCamera(transport, { args = [], log = console.warn } = {}) {
   const feed = createCamera(transport, { log });
   const child = spawn("uv", ["run", fileURLToPath(new URL("./hands.py", import.meta.url)), ...args], { stdio: ["ignore", "pipe", "inherit"] });
-  createInterface({ input: child.stdout }).on("line", feed);
+  // SHWAY_TRACE=<file>: log gestures and append the raw frames, for replaying through the recognizer.
+  createInterface({ input: child.stdout }).on("line", TRACE ? (l) => { if (!l.includes('"preview"')) appendFileSync(TRACE, l + "\n"); feed(l); } : feed);
   child.on("error", (e) => log(`camera: could not start uv (${e.message}); install uv or run without --camera`));
   child.on("exit", (code, signal) => { feed(null); log(`camera: worker exited (${signal ?? `code ${code}`}); chat still works, restart the assistant to retry`); });
   process.once("exit", () => child.kill());
