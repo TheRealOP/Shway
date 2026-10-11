@@ -57,6 +57,14 @@
   <div class="row" style="margin-top:4px"><label class="note" for="proxy">Transcribe</label><input id="proxy" value="http://127.0.0.1:8790" style="flex:1"></div>
   <pre id="log"></pre>
 </section>
+<section id="transition-preview" hidden style="margin:16px 0;padding:16px;border:1px solid #555;border-radius:12px">
+  <h2>Staged transition · timed frames</h2>
+  <p id="transition-inspection"></p>
+  <img id="transition-frame" alt="Rendered staged transition frame" style="width:100%;max-width:480px;image-rendering:auto">
+  <p id="transition-time"></p>
+  <div id="transition-strip" style="display:flex;gap:8px;overflow:auto"></div>
+  <p id="transition-samples">Sampled frames, not continuous playback. Accept or reject in the editor chat panel.</p>
+</section>
 <script type="module">
 import { createRecognizer } from "./gestures/recognizer.mjs";
 import { openCamera, runHands, drawOverlay, flashFor, LABELS } from "./gestures/hands.mjs";
@@ -75,6 +83,32 @@ const ink = createInk();
 const sendInk = createInkSender(post, { onError: (e) => show(`Ink not sent: ${e?.message ?? e}`) });
 const inkChanged = (changed) => { if (changed) sendInk(ink.state()); };
 const show = (s) => { if (!s) return; $("status").textContent = s; $("log").textContent = `${new Date().toLocaleTimeString()} ${s}\n` + $("log").textContent.slice(0, 4000); };
+
+// Rendered proposal frames stay on the staged token; polling never edits or seeks the project.
+let shownPreview = null;
+async function showTransitionPreview() {
+  try {
+    const base = $("asst").value.replace(/\/$/, "");
+    const state = await fetch(base + "/chat/state").then(r => r.json());
+    if (!state.pending?.rendered) { $("transition-preview").hidden = true; shownPreview = null; return; }
+    if (shownPreview === state.pending.token) return;
+    const response = await fetch(base + "/chat/preview");
+    if (!response.ok) { $("transition-preview").hidden = true; return; }
+    const p = await response.json();
+    if (!Array.isArray(p.frames) || p.frames.length > 5 || p.token !== state.pending.token) return;
+    const frames = p.frames.filter(f => typeof f.image === "string" && f.image.startsWith("data:image/png;base64,") && Number.isFinite(f.timeSeconds));
+    if (!frames.length) return;
+    shownPreview = p.token;
+    const select = f => { $("transition-frame").src = f.image; $("transition-time").textContent = f.timeSeconds.toFixed(3) + " s · frame " + f.frame; };
+    $("transition-inspection").textContent = p.inspection ?? "";
+    $("transition-samples").textContent = `${frames.length} sampled frames, not continuous playback. Accept or reject in the editor chat panel.`;
+    $("transition-strip").replaceChildren(...frames.map(f => {
+      const b = document.createElement("button"); b.type = "button"; b.textContent = f.timeSeconds.toFixed(3) + " s"; b.onclick = () => select(f); return b;
+    }));
+    select(frames[Math.floor(frames.length / 2)]); $("transition-preview").hidden = false;
+  } catch { $("transition-preview").hidden = true; }
+}
+setInterval(showTransitionPreview, 1000);
 
 // ---- Push-to-talk: its start is the stop; the utterance becomes one note bound to that moment.
 const capture = createCapture(voice, { stream: () => stream, onUtterance: async (u) => {

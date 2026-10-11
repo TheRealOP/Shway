@@ -43,27 +43,62 @@ sketch. Double tap no longer toggles playback; play/stop are spoken or keys. The
 
 The thumb–index tap replaced the handoff's thumb–middle tap at the creator's request (2026-10-11).
 
-## Sketch vocabulary (2026-10-11, DEV-93)
+## Freehand drawing + explanation (2026-10-11)
 
-One finished sketch, one edit. When a chat message arrives while a finished sketch (strokes, drawing
-off) is on the Program monitor, the assistant takes `ui.screenshot {panel:"program"}` (frame + ink)
-and asks the vision model (`gemini-3.1-pro-preview`) to **classify** it into a fixed enum. Code maps
-the figure to the effect; the chat model (Flash) only picks the clips through the `transition`
-action. "Use this video afterwards" = the named or selected clip plays right after the current one:
-one proposal holds `timeline.move` (only when that clip doesn't already follow) and
-`sequence.applyVideoTransition` at the cut, so preview, Accept/Reject and one undo work as for every
-assistant edit. The ink is cleared after Accept or Reject. Code: [shway/assistant.mjs](../../shway/assistant.mjs),
-step: `crates/engine/src/proposals.rs`.
+One finished sketch and its typed or transcribed explanation form one multimodal request.
+The assistant sends the Program monitor PNG, ordered strokes in full-picture normalized coordinates,
+current clip/selection, playhead and project context to the existing vision model
+(`gemini-3.1-pro-preview`). There is no recognized-shape enum: a circle can identify a region
+and arrows can describe framing or motion. The explanation determines the intended edit;
+a circle does not automatically request an iris transition.
 
-| Figure | Edit | Status |
-| --- | --- | --- |
-| `split_outward`: a line with two arrows pointing apart | `split` transition between the two clips | Verified in assistant, adapter and Rust proposal tests (fake editor and model); live drawing, vision reading and editor not verified |
-| `arrow_left` / `arrow_right` | `push` transition, that direction | Same as above |
-| `circle` | `iris_round` transition | Same as above |
-| `unknown` (or anything outside the enum) | Reply with what it saw; nothing changes; the sketch stays | Verified in assistant tests |
+Supported outputs stay bounded: existing trim/remove/move/take replacement, a split/push/iris
+transition, a static zoom into an explicit normalized rectangle, or a batch from the runtime
+`proposal.tools` catalog. Unsupported or ambiguous requests ask for clarification and retain the
+sketch. Registry descriptions do not authorize arbitrary execution.
 
-Refusals are replies, not errors: an oversized Program picture (> 6 MB PNG), a stale revision, or
-the engine refusing the edit (no neighbouring clip, locked track) each say so and change nothing.
+For example, draw a circle around a subject with outward arrows and explain “Zoom 2x into the
+circled area.” The assistant proposes a relative 2× zoom/recenter on the video clip under the
+captured frame. `clip.zoomRegion {clip, region:[left,top,right,bottom], factor}` is a proposal
+step that composes the existing Motion position/scale through `effects.setParam`.
+It applies to the whole clip, preserves rotation/anchor/nonuniform proportions and linked audio,
+and refuses animated or disabled Motion. Region coordinates must be finite 0–1, at least 0.02
+wide/high; factor must be >1 and ≤4; composed scales are capped at 4000%.
+
+The first nonempty ink pauses playback and binds the drawing to revision, sequence, playhead
+and topmost video clip. A changed frame/project before interpretation, or changed drawing/frame/project
+during interpretation, refuses staging. The screenshot is sent only when `perf.stats` reports
+the Program picture at the captured frame and project revision, checked before and after capture. Preview, explicit Accept/Reject, and one-step Undo use
+the existing engine path. Decisions consume only the submitted strokes, preserving newer ink.
+
+See [acceptance evidence](acceptance.md#freehand-intent-and-region-zoom-2026-10-11) for checks
+and limitations; live camera/model interpretation and export of this zoom are separate checks.
+
+### Ordinary tools and transition inspection
+
+`edit.steps` names approved commands, explicit timeline clip IDs and target-free arguments.
+Rust validates the catalog, argument types/ranges, effects, locked targets and linked partners,
+and runs the whole batch in the disposable proposal session. Accept commits one history entry;
+Reject discards it. Effects/keyframes, speed/reverse, audio gain/volume, split/slip/slide/roll,
+nudges, framing, text/shapes, captions and essential-sound tagging reuse existing commands.
+Select/seek/step/next/previous are separate bounded navigation actions.
+
+The current catalog has 62 generic commands and 180 applicable video/audio effects. Within the
+core `clip.*`, `timeline.*`, `effects.*` namespaces it supports 57 of 89 project-editing command
+entries (64%, **including shortcut aliases**). All 121 journaled core entries remain reported;
+32 exclusions are selection/targeting state, preferences, reveal and external audio extraction,
+listed by ID in the catalog. Specialized project edits such as multicam, remix and source metadata
+remain in the denominator even though unsupported. This is command-entry coverage, not a claim
+about a majority of every editor capability. Files, export, recording and preferences require
+their own flows; curve/path parameters require another bounded schema.
+
+A proposed transition is rendered through its staged token at five ordered times around the
+cut, clamped to valid sequence frames and deduplicated (at least three frames required).
+Up to 128-pixel frames and exact timestamps go together
+to vision for inspection. A failed/invalid review, rendering failure or stale token cancels the
+candidate. Only inspected candidates become pending for Accept. `/chat/preview` serves the same
+token's images to the review page, labeled **timed sampled frames**, not continuous playback.
+Sparse frames cannot verify motion between samples or audio; the creator retains Accept/Reject.
 
 ## State model
 

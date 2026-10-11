@@ -776,3 +776,250 @@ fn hostile_transition_steps_are_rejected_without_a_candidate() {
         assert!(s.proposal.is_none(), "{name}");
     }
 }
+
+fn zoom_proposal(s: &Session, clip: u64) -> Value {
+    json!({"expectedRevision":s.revision,"sequence":s.state.active_sequence.unwrap().0,"label":"Zoom circled subject",
+        "steps":[{"command":"clip.zoomRegion","params":{"clip":clip,"region":[0.1,0.2,0.4,0.6],"factor":2.0}}]})
+}
+
+#[test]
+fn zoom_region_composes_motion_renders_and_is_one_undo_step() {
+    let (mut s, clip, _, audio) = fixture();
+    s.execute("effects.setParam", json!({"clip":clip,"effect":"motion","param":"position","value":[800,400]})).unwrap();
+    s.execute("effects.setParam", json!({"clip":clip,"effect":"motion","param":"scale","value":120})).unwrap();
+    s.execute("effects.setParam", json!({"clip":clip,"effect":"motion","param":"rotation","value":30})).unwrap();
+    s.execute("effects.setParam", json!({"clip":clip,"effect":"motion","param":"anchor","value":[600,300]})).unwrap();
+    s.execute("effects.setParam", json!({"clip":clip,"effect":"motion","param":"uniform_scale","value":false})).unwrap();
+    s.execute("effects.setParam", json!({"clip":clip,"effect":"motion","param":"scale_width","value":80})).unwrap();
+    let base = s.project.clone();
+    let undo = s.history.undo.len();
+    let settings = &s.active_sequence().unwrap().settings;
+    let size = (settings.width, settings.height);
+    let old = s.active_sequence().unwrap().find_item(ClipId(clip)).unwrap().1;
+    let time = s.sequence_rate().snap(old.start + filmcraft_time::Tick(old.duration.0 / 2));
+    let frame = s.sequence_rate().frame_at(time);
+    let original = s.try_render_program_at(32.0 / size.0.max(size.1) as f32, time).unwrap().to_rgba8();
+    let matrix = filmcraft_render::motion_matrix(s.active_sequence().unwrap(), old, size, old.source_in);
+    let marked_source = matrix.inverse().unwrap().apply(filmcraft_geom::Vec2::new(0.25 * f64::from(size.0), 0.4 * f64::from(size.1)));
+    let params = zoom_proposal(&s, clip);
+    let token = run(&mut s, params);
+    assert!(Arc::ptr_eq(&s.project, &base));
+    let before = s.execute("proposal.render", json!({"token":token,"frame":frame,"maxSide":32})).unwrap();
+    let pixels: Vec<u8> = before["rgba"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u8).collect();
+    assert_ne!(pixels, original, "zoom must change rendered pixels");
+    s.execute("proposal.commit", json!({"token":token})).unwrap();
+    let q = s.active_sequence().unwrap();
+    let motion = q.find_item(ClipId(clip)).unwrap().1.effect("motion").unwrap();
+    assert_eq!(motion.f64_at("scale", time), 240.0);
+    assert_eq!(motion.f64_at("scale_width", time), 160.0);
+    assert_eq!(motion.f64_at("rotation", time), 30.0);
+    let now = q.find_item(ClipId(clip)).unwrap().1;
+    let marked_output = filmcraft_render::motion_matrix(q, now, size, now.source_in).apply(marked_source);
+    assert!((marked_output.x - f64::from(size.0) / 2.0).abs() < 1e-6);
+    assert!((marked_output.y - f64::from(size.1) / 2.0).abs() < 1e-6);
+    let committed_pixels = s.try_render_program_at(32.0 / size.0.max(size.1) as f32, time).unwrap().to_rgba8();
+    assert_eq!(pixels, committed_pixels, "candidate and accepted render must match");
+    let pos = motion.vec2_at("position", time);
+    let w = f64::from(q.settings.width);
+    let h = f64::from(q.settings.height);
+    assert!((pos.x - (w / 2.0 + 2.0 * (800.0 - 0.25 * w))).abs() < 1e-6);
+    assert!((pos.y - (h / 2.0 + 2.0 * (400.0 - 0.4 * h))).abs() < 1e-6);
+    assert_eq!(q.find_item(ClipId(audio)).unwrap().1, base.sequence(s.state.active_sequence.unwrap()).unwrap().find_item(ClipId(audio)).unwrap().1);
+    assert_eq!(s.history.undo.len(), undo + 1);
+    let saved = serde_json::to_string(&*s.project).unwrap();
+    let reopened: filmcraft_project::Project = serde_json::from_str(&saved).unwrap();
+    assert_eq!(reopened, *s.project);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(*s.project, *base);
+    let params = zoom_proposal(&s, clip);
+    let token = run(&mut s, params);
+    s.execute("proposal.cancel", json!({"token":token})).unwrap();
+    assert_eq!(*s.project, *base);
+}
+
+#[test]
+fn zoom_region_rejects_hostile_locked_audio_animated_and_stale_inputs() {
+    let (mut s, clip, _, audio) = fixture();
+    let base = s.project.clone();
+    for params in [
+        json!({"clip":clip,"region":[0,0,1,2],"factor":2}),
+        json!({"clip":clip,"region":[0.8,0,0.2,1],"factor":2}),
+        json!({"clip":clip,"region":[0,0,0.01,1],"factor":2}),
+        json!({"clip":clip,"region":[0,0,1],"factor":2}),
+        json!({"clip":clip,"region":[0,0,1,1],"factor":1}),
+        json!({"clip":clip,"region":[0,0,1,1],"factor":5}),
+        json!({"clip":audio,"region":[0,0,1,1],"factor":2}),
+        json!({"clip":0,"region":[0,0,1,1],"factor":2}),
+        json!({"clip":clip,"region":[0,0,1,1],"factor":2,"extra":true}),
+    ] {
+        let mut p = zoom_proposal(&s, clip);
+        p["steps"][0]["params"] = params;
+        assert!(s.execute("proposal.preview", p).is_err());
+        assert_eq!(*s.project, *base);
+    }
+    Arc::make_mut(&mut s.project).sequence_mut(s.state.active_sequence.unwrap()).unwrap().video_tracks[0].locked = true;
+    let p = zoom_proposal(&s, clip);
+    assert!(s.execute("proposal.preview", p).unwrap_err().to_string().contains("locked"));
+    Arc::make_mut(&mut s.project).sequence_mut(s.state.active_sequence.unwrap()).unwrap().video_tracks[0].locked = false;
+    let p = zoom_proposal(&s, clip);
+    let token = run(&mut s, p);
+    s.execute("effects.setParam", json!({"clip":clip,"effect":"motion","param":"scale","value":110})).unwrap();
+    let newer = s.project.clone();
+    assert!(s.execute("proposal.commit", json!({"token":token})).is_err());
+    s.execute("proposal.cancel", json!({"token":token})).unwrap();
+    assert_eq!(*s.project, *newer);
+    s.execute("effects.toggleAnimation", json!({"clip":clip,"effect":"motion","param":"position"})).unwrap();
+    let p = zoom_proposal(&s, clip);
+    assert!(s.execute("proposal.preview", p).is_err());
+}
+
+fn command_step(command: &str, clips: Vec<u64>, args: Value) -> Value {
+    json!({"command":"editor.command","params":{"id":command,"clips":clips,"args":args}})
+}
+
+#[test]
+fn ordinary_tool_registry_reports_actual_coverage_and_effect_definitions() {
+    let (mut s, _, _, _) = fixture();
+    let catalog = s.execute("proposal.tools", json!({})).unwrap();
+    eprintln!(
+        "assistant tool coverage: {} generic tools, {} / {} core clip/timeline/effects commands, {} applicable effects",
+        catalog["supported"], catalog["coreSupported"], catalog["coreRegisteredEditingCommands"], catalog["applicableEffects"]
+    );
+    assert!(catalog["coreSupported"].as_u64().unwrap() * 2 > catalog["coreRegisteredEditingCommands"].as_u64().unwrap());
+    assert_eq!(
+        catalog["coreRegisteredCommands"].as_u64().unwrap(),
+        catalog["coreRegisteredEditingCommands"].as_u64().unwrap() + catalog["coverageExcluded"].as_array().unwrap().len() as u64
+    );
+    assert!(catalog["applicableEffects"].as_u64().unwrap() > 100);
+    for t in catalog["tools"].as_array().unwrap() {
+        assert!(crate::commands::find(t["id"].as_str().unwrap()).is_some());
+    }
+}
+
+#[test]
+fn ordinary_effect_keyframe_gain_speed_graphics_caption_tools_preview_commit_and_undo() {
+    let cases = [
+        ("effects.apply", json!({"effect":"gaussian_blur"})),
+        ("effects.setParam", json!({"effect":"motion","param":"scale","value":120})),
+        ("effects.toggleAnimation", json!({"effect":"motion","param":"scale"})),
+        ("effects.addKeyframe", json!({"effect":"motion","param":"scale","time":254016000000i64})),
+        ("clip.audioGain", json!({"mode":"adjust","db":-3})),
+        ("clip.speedDuration", json!({"speed":125,"reverse":true,"ripple":false})),
+        ("clip.rename", json!({"name":"Opening shot"})),
+        ("clip.enable", json!({})),
+        ("clip.group", json!({})),
+        ("clip.fitToFrame", json!({})),
+        ("clip.fillFrame", json!({})),
+        ("clip.timeInterpolation.frameBlending", json!({})),
+        ("clip.setTimeInterpolation", json!({"mode":"frameSampling"})),
+        ("clip.nudgeVolumeUp3", json!({})),
+        ("clip.volumeDown", json!({})),
+        ("timeline.nudgeRight", json!({})),
+        ("timeline.slipRight5", json!({})),
+        ("timeline.slideRight", json!({})),
+        ("timeline.razor", json!({"time":254016000000i64})),
+        ("timeline.slip", json!({"deltaFrames":1})),
+        ("graphics.newText", json!({"text":"Our workshop","size":60})),
+        ("graphics.newShape", json!({"shape":"ellipse","size":[100,100]})),
+        ("captions.add", json!({"text":"Welcome to our workshop"})),
+    ];
+    for (cmd, args) in cases {
+        let (mut s, c, _, _) = fixture();
+        let base = s.project.clone();
+        let undo = s.history.undo.len();
+        let p = edit(&s, json!([command_step(cmd, vec![c], args)]));
+        let token = s.execute("proposal.preview", p).unwrap_or_else(|e| panic!("{cmd}: {e}"))["token"].as_u64().unwrap();
+        assert!(Arc::ptr_eq(&s.project, &base), "{cmd}");
+        s.execute("proposal.commit", json!({"token":token})).unwrap();
+        assert_eq!(s.history.undo.len(), undo + 1, "{cmd}");
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(*s.project, *base, "{cmd}");
+    }
+}
+
+#[test]
+fn ordinary_tools_reject_external_side_effects_hostile_values_and_target_injection() {
+    let (mut s, c, _, _) = fixture();
+    let base = s.project.clone();
+    for (cmd, args) in [
+        ("file.exportMedia", json!({"path":"/tmp/no.mp4"})),
+        ("prefs.set", json!({})),
+        ("effects.apply", json!({"effect":"unknown"})),
+        ("effects.apply", json!({"effect":"split"})),
+        ("effects.setParam", json!({"effect":"motion","param":"scale","value":1e30})),
+        ("effects.setParam", json!({"effect":"motion","param":"scale","value":"huge"})),
+        ("effects.setParam", json!({"effect":"motion","param":"scale","value":120,"clip":999})),
+        ("clip.speedDuration", json!({"speed":0})),
+        ("clip.speedDuration", json!({"speed":100000})),
+        ("timeline.slip", json!({"deltaFrames":i64::MAX})),
+        ("timeline.slip", json!({"deltaFrames":0})),
+        ("graphics.newText", json!({"text":"x","size":1e9})),
+    ] {
+        let p = edit(&s, json!([command_step(cmd, vec![c], args)]));
+        assert!(s.execute("proposal.preview", p).is_err(), "{cmd}");
+        assert_eq!(*s.project, *base);
+    }
+    let p = edit(
+        &s,
+        json!([
+            command_step("effects.setParam", vec![c], json!({"effect":"motion","param":"scale","value":120})),
+            command_step("effects.apply", vec![c], json!({"effect":"unknown"}))
+        ]),
+    );
+    let undo = s.history.undo.len();
+    assert!(s.execute("proposal.preview", p).is_err());
+    assert_eq!(*s.project, *base);
+    assert_eq!(s.history.undo.len(), undo);
+    assert!(s.proposal.is_none());
+    Arc::make_mut(&mut s.project).sequence_mut(s.state.active_sequence.unwrap()).unwrap().audio_tracks[0].locked = true;
+    let locked = s.project.clone();
+    let p = edit(&s, json!([command_step("clip.nudgeVolumeUp3", vec![c], json!({}))]));
+    assert!(s.execute("proposal.preview", p).unwrap_err().to_string().contains("locked"));
+    assert_eq!(*s.project, *locked);
+    assert!(s.proposal.is_none());
+}
+
+#[test]
+fn transition_renders_temporal_candidate_frames_without_changing_live_time_and_matches_commit() {
+    let (mut s, pairs, _) = cut_fixture();
+    let base = s.project.clone();
+    let ph = s.playhead();
+    let p = edit(&s, json!([join(pairs[1].0, "split", "out")]));
+    let token = run(&mut s, p);
+    let inspection = s.execute("proposal.inspect", json!({"token":token})).unwrap();
+    let t = &inspection["sequence"]["video"][0]["transitions"][0];
+    let start = t["start"].as_i64().unwrap();
+    let duration = t["duration"].as_i64().unwrap();
+    let ft = s.sequence_rate().frame_duration().0;
+    let last = (inspection["sequence"]["duration"].as_i64().unwrap() - 1) / ft;
+    let frames = [start - ft, start + duration / 4, start + duration / 2, start + duration * 3 / 4, start + duration + ft]
+        .map(|t| s.sequence_rate().frame_at(filmcraft_time::Tick(t.max(0))).min(last));
+    let pixels: Vec<_> = frames.iter().map(|f| s.execute("proposal.render", json!({"token":token,"frame":f,"maxSide":64})).unwrap()).collect();
+    if let Some(dir) = std::env::var_os("SHWAY_PREVIEW_EVIDENCE_DIR") {
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (n, p) in pixels.iter().enumerate() {
+            let rgba: Vec<u8> = p["rgba"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u8).collect();
+            image::save_buffer(
+                dir.join(format!("transition-{n}.png")),
+                &rgba,
+                p["width"].as_u64().unwrap() as u32,
+                p["height"].as_u64().unwrap() as u32,
+                image::ColorType::Rgba8,
+            )
+            .unwrap();
+        }
+    }
+    assert!(pixels.windows(2).any(|p| p[0]["rgba"] != p[1]["rgba"]));
+    assert_eq!(s.playhead(), ph);
+    assert!(Arc::ptr_eq(&s.project, &base));
+    s.execute("proposal.commit", json!({"token":token})).unwrap();
+    let q = s.active_sequence().unwrap();
+    let scale = 64.0 / q.settings.width.max(q.settings.height) as f32;
+    for (frame, p) in frames.iter().zip(pixels) {
+        let image = s.try_render_program_at(scale, s.sequence_rate().tick_of(*frame)).unwrap();
+        assert_eq!(json!(image.to_rgba8()), p["rgba"]);
+    }
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(*s.project, *base);
+}

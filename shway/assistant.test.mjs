@@ -15,7 +15,7 @@ const REQUIRED = ["project.inspect", "sequence.inspect", "timeline.select", "pla
 const clip = (clip, item, link, start, dur, sourceIn, name) => ({ clip, item, link, name, start: start * F, duration: dur * F, sourceIn: sourceIn * F, sourceOut: (sourceIn + dur) * F });
 
 function fakeEditor() {
-  const st = { revision: 5, proposal: null, next: 1, history: [], previews: [], onPreview: null, playhead: 400 * F, playing: true, ui: [], ink: [], inkGate: null, shots: [], shotSize: 64 };
+  const st = { revision: 5, proposal: null, next: 1, history: [], previews: [], renders: [], onPreview: null, playhead: 400 * F, playing: true, ui: [], ink: [], inkGate: null, shots: [], shotSize: 64, monitorFrame: null, monitorRevision: null };
   const seq = () => ({
     id: 27, name: "Cut", duration: 450 * F, settings: { frame_rate: { num: 30, den: 1 } }, playhead: 0, selection: [],
     video: [{ id: 1, locked: false, items: [clip(10, 1, 1, 0, 300, 30, "C5500.MP4"), clip(12, 2, 2, 300, 150, 0, "C5517.MP4")] }],
@@ -33,8 +33,18 @@ function fakeEditor() {
         if (st.proposal) throw new Error("edit proposal: cancel or commit the current preview before proposing another");
         if (p.expectedRevision !== st.revision) throw new Error("edit proposal: stale revision, different active sequence or active dynamic trim");
         st.previews.push(p);
-        st.proposal = { token: st.next++, label: p.label, revision: st.revision };
-        return { token: st.proposal.token, expectedRevision: p.expectedRevision, label: p.label, sequence: seq(), results: [{}] };
+        st.proposal = { token: st.next++, label: p.label, revision: st.revision, steps: p.steps };
+        return { token: st.proposal.token, expectedRevision: p.expectedRevision, label: p.label, sequence: seq(), results: p.steps.map(step => step.command === "sequence.applyVideoTransition" ? {transition: 44} : {}) };
+      }
+      case "proposal.tools": return {tools: [{id: "effects.apply", args: ["effect"]}, {id: "effects.setParam", args: ["effect","param","value","time"]}, {id: "clip.audioGain", args: ["mode","db"]}], effects: []};
+      case "proposal.inspect": {
+        if (!st.proposal || st.proposal.revision !== st.revision) throw new Error("stale project preview");
+        const sequence = seq(); sequence.video[0].transitions = [{id:44,start:290*F,duration:20*F}];
+        return {token:st.proposal.token, expectedRevision:st.revision, label:st.proposal.label, sequence, results:[{transition:44}]};
+      }
+      case "proposal.render": {
+        if (!st.proposal || st.proposal.revision !== st.revision) throw new Error("stale project preview");
+        st.renders.push(p); return {width:1,height:1,rgba:[p.frame % 256,0,0,255]};
       }
       case "proposal.cancel":
         if (st.proposal?.token !== p.token) throw new Error("edit proposal: unknown or expired preview token");
@@ -68,6 +78,7 @@ function fakeEditor() {
             writeFileSync(req.params.path, Buffer.alloc(st.shotSize, 7));
           }
           const result = req.method === "engine.commands" ? REQUIRED.map((id) => ({ id })) : req.method === "ui.inspect" ? { playhead: st.playhead }
+            : req.method === "perf.stats" ? { monitor: {frame: st.monitorFrame ?? Math.floor(st.playhead / F), revision: st.monitorRevision ?? st.revision, projectRevision: st.revision, playheadFrame: Math.floor(st.playhead / F)} }
             : req.method === "ui.screenshot" ? { path: req.params.path, width: 8, height: 8 }
             : req.method === "ui.playback" ? (st.ui.push([req.params.action, req.params.speed]), st.playing = req.params.action === "play", { playing: st.playing, playhead: st.playhead })
             : exec(req.params.command, req.params.params);
@@ -89,11 +100,11 @@ function fakeProxy() {
     if (req.url === "/health") { res.writeHead(200); return res.end(JSON.stringify({ ok: true, jev: false })); }
     prompts.push(JSON.parse(body));
     if (gate) await gate;
-    const a = answers.shift();
+    const a = answers.shift() ?? (prompts.at(-1)?.schema?.properties?.ok ? {ok:true,summary:"The timed frames show the requested transition."} : undefined);
     if (typeof a === "function") a();
     res.writeHead(200, { "content-type": "application/json" });
     const next = typeof a === "function" ? answers.shift() : a;
-    res.end(JSON.stringify({ json: next && "figure" in next ? next : A(next) })); // a sketch reading is sent as is
+    res.end(JSON.stringify({ json: next && "ok" in next ? next : A(next) })); // a sketch reading is sent as is
   });
   return { answers, prompts, server, hold() { let open; gate = new Promise((r) => (open = r)); return () => { gate = null; open(); }; } };
 }
@@ -124,8 +135,8 @@ test("answer: state keeps the conversation; the model sees project data incl. tr
   const st = await s.call("/chat/state");
   assert.deepEqual(st.body, { messages: [{ role: "user", text: "where is the Chili's part?" }, { role: "assistant", text: "The second clip is at Chili's." }], pending: null, busy: false });
   const prompt = s.proxy.prompts[0].prompt;
-  assert.match(prompt, /"id":12,"track":"V1","file":"C5517.MP4","start":10,"duration":5,"link":2,"says":"we're at Chili's"/);
-  assert.doesNotMatch(prompt, /"id":11/); // linked audio is folded into its video clip
+  assert.match(prompt, /"id":12,"track":"V1","file":"C5517.MP4","start":10,"duration":5,"link":2,.*"says":"we're at Chili's"/);
+  assert.match(prompt, /"linkedAudio":\[\{"id":11/); // audio tools can address the linked partner explicitly
   assert.ok(s.proxy.prompts[0].schema && s.proxy.prompts[0].system);
 });
 
@@ -426,14 +437,13 @@ test("/ink is hostile-input safe: caps 20 strokes × 500 points, drops bad point
   assert.deepEqual(readInk({}), { pointer: null, strokes: [], drawing: false });
 });
 
-// ---- Sketch → edit (DEV-93): a finished sketch is read by the vision model; code maps figure → transition.
+// ---- Freehand + explanation → one grounded multimodal edit.
 const SKETCH = { pointer: null, strokes: [[[0.5, 0.2], [0.5, 0.8]], [[0.45, 0.5], [0.3, 0.5]], [[0.55, 0.5], [0.7, 0.5]]], drawing: false };
-const seen = (figure, description = "a vertical line with arrows pointing apart") => ({ figure, description });
 
 test("sketch: split figure + 'use this video afterwards' → move then split in one preview; accept commits; ink cleared", async (t) => {
   const s = await setup(); t.after(s.close);
   await s.call("/ink", SKETCH);
-  s.proxy.answers.push(seen("split_outward"), { action: "transition", reply: "Splitting into the first clip.", from: 12, to: 10 });
+  s.proxy.answers.push({ action: "transition", reply: "Splitting into the first clip.", from: 12, to: 10, effect: "split", direction: "none" });
   const r = await s.call("/chat", { message: "use this video afterwards" });
   assert.match(r.body.reply, /^Splitting into the first clip\. Preview ready/);
   // The vision call: Program monitor screenshot + strokes, on the sketch model; the file is removed after.
@@ -443,10 +453,9 @@ test("sketch: split figure + 'use this video afterwards' → move then split in 
   assert.equal(vision.model, SKETCH_MODEL);
   assert.deepEqual(vision.images, [{ mimeType: "image/png", data: Buffer.alloc(64, 7).toString("base64") }]);
   assert.match(vision.prompt, /\[\[\[0\.5,0\.2\],\[0\.5,0\.8\]\]/);
-  assert.deepEqual(vision.schema.properties.figure.enum, ["split_outward", "arrow_left", "arrow_right", "circle", "unknown"]);
-  // The action picker is told the effect and the current clip (the sequence playhead is 0: clip 10).
-  assert.match(s.proxy.prompts[1].system, /a split transition.*CURRENT clip 10/);
-  assert.equal(s.proxy.prompts[1].model, undefined); // default (Flash) model
+  assert.equal(vision.schema.properties.figure, undefined);
+  assert.match(vision.prompt, /use this video afterwards/);
+  assert.match(vision.system, /CURRENT video clip 12/);
   assert.deepEqual(s.editor.previews[0].steps, [
     { command: "timeline.move", params: { clip: 10, anchor: 12, position: "after" } },
     { command: "sequence.applyVideoTransition", params: { clip: 12, effect: "split", edge: "out" } },
@@ -473,10 +482,10 @@ test("sketch: split figure + 'use this video afterwards' → move then split in 
   assert.equal(s.proxy.prompts.length, 3);
 });
 
-test("sketch: an arrow maps to push with its direction (one step when the clip already follows); reject clears the ink", async (t) => {
+test("sketch: explanation chooses a push with its direction (one step when the clip already follows); reject clears the ink", async (t) => {
   const s = await setup(); t.after(s.close);
   await s.call("/ink", SKETCH);
-  s.proxy.answers.push(seen("arrow_left", "an arrow pointing left"), { action: "transition", reply: "Pushing left.", from: 10, to: 12 });
+  s.proxy.answers.push({ action: "transition", reply: "Pushing left.", from: 10, to: 12, effect: "push", direction: "left" });
   await s.call("/chat", { message: "push to the next shot" });
   assert.deepEqual(s.editor.previews[0].steps, [{ command: "sequence.applyVideoTransition", params: { clip: 10, effect: "push", edge: "out", direction: "left" } }]);
   assert.equal(s.editor.previews[0].label, "Push from C5500.MP4 to C5517.MP4");
@@ -484,27 +493,24 @@ test("sketch: an arrow maps to push with its direction (one step when the clip a
   assert.match(r.body.reply, /^Discarded/);
   assert.equal(s.editor.history.length, 0);
   assert.deepEqual(s.editor.ink.at(-1), null);
-  // A circle is an iris (a fresh sketch, after the camera cleared the old one).
+  // The same strokes can request an iris when the explanation explicitly asks for it.
   await s.call("/ink", { pointer: null, strokes: [], drawing: false });
   await s.call("/ink", SKETCH);
-  s.proxy.answers.push(seen("circle", "a circle"), { action: "transition", reply: "Iris.", from: 10, to: 12 });
+  s.proxy.answers.push({ action: "transition", reply: "Iris.", from: 10, to: 12, effect: "iris_round", direction: "none" });
   await s.call("/chat", { message: "iris into the next one" });
   assert.equal(s.editor.previews[1].steps[0].params.effect, "iris_round");
 });
 
-test("sketch: an unknown figure is described and nothing changes; the ink stays for a redraw", async (t) => {
+test("sketch: ambiguous freehand intent asks for clarification and preserves ink", async (t) => {
   const s = await setup(); t.after(s.close);
   await s.call("/ink", SKETCH);
-  s.proxy.answers.push(seen("unknown", "a smiley face"));
+  s.proxy.answers.push({ action: "answer", reply: "Do you want a zoom on this area or an iris transition?" });
   const r = await s.call("/chat", { message: "do this" });
-  assert.equal(r.body.reply, "I see a smiley face, but that isn't a sketch I know (split, arrow or circle). Nothing changed.");
+  assert.match(r.body.reply, /zoom.*iris/);
   assert.equal(r.body.pending, null);
   assert.equal(s.proxy.prompts.length, 1);
   assert.equal(s.editor.previews.length, 0);
   assert.deepEqual(s.editor.ink, [SKETCH]);
-  // A figure outside the enum is not trusted either.
-  s.proxy.answers.push({ figure: "star", description: "x" });
-  assert.match((await s.call("/chat", { message: "do this" })).body.reply, /no known figure/);
 });
 
 test("sketch: only a finished sketch is read; without one a transition action is invalid", async (t) => {
@@ -532,16 +538,170 @@ test("sketch: oversized Program picture is refused before the vision call", asyn
 test("sketch: stale revision and an engine refusal are friendly replies, not 502", async (t) => {
   const s = await setup(); t.after(s.close);
   await s.call("/ink", SKETCH);
-  s.proxy.answers.push(seen("split_outward"), () => { s.editor.revision++; }, { action: "transition", reply: "ok", from: 10, to: 12 });
+  s.proxy.answers.push(() => { s.editor.revision++; }, { action: "transition", reply: "ok", from: 10, to: 12, effect: "split", direction: "none" });
   let r = await s.call("/chat", { message: "use this video afterwards" });
   assert.equal(r.status, 200);
   assert.match(r.body.reply, /project changed.*send it again/);
   // The engine's own (non-proposal) error for the transition is reported, and nothing is pending.
+  await s.call("/ink", { pointer: null, strokes: [], drawing: false });
+  await s.call("/ink", SKETCH);
   s.editor.onPreview = () => { throw new Error("sequence.applyVideoTransition: no edit point at the playhead on targeted tracks"); };
-  s.proxy.answers.push(seen("split_outward"), { action: "transition", reply: "ok", from: 10, to: 12 });
+  s.proxy.answers.push({ action: "transition", reply: "ok", from: 10, to: 12, effect: "split", direction: "none" });
   r = await s.call("/chat", { message: "use this video afterwards" });
   assert.equal(r.status, 200);
   assert.match(r.body.reply, /^The editor refused that transition \(.*no edit point.*\)\. Nothing changed\.$/);
   assert.equal(r.body.pending, null);
   assert.equal(s.editor.history.length, 0);
+});
+
+const CIRCLE_ARROWS = { pointer: null, drawing: false, strokes: [
+  [[0.15, 0.2], [0.3, 0.15], [0.45, 0.2], [0.5, 0.4], [0.4, 0.6], [0.2, 0.6], [0.1, 0.4], [0.15, 0.2]],
+  [[0.45, 0.2], [0.7, 0.1], [0.65, 0.18]], [[0.7, 0.1], [0.6, 0.08]],
+]};
+const ZOOM = { action: "zoom", reply: "Zooming twice into the circled subject.", clip: 12, region: [0.1, 0.15, 0.5, 0.6], factor: 2 };
+
+test("circle with arrows and explanation reaches one vision request; grounded zoom previews, accepts and clears ink", async (t) => {
+  const s = await setup(); t.after(s.close);
+  await s.call("/ink", CIRCLE_ARROWS);
+  s.proxy.answers.push(ZOOM);
+  const r = await s.call("/chat", { message: "Zoom 2x into the circled area; arrows show it filling more of the frame." });
+  assert.match(r.body.reply, /Preview ready/);
+  assert.equal(s.proxy.prompts.length, 1);
+  const request = s.proxy.prompts[0];
+  assert.equal(request.model, SKETCH_MODEL);
+  assert.ok(request.images[0].data);
+  assert.match(request.prompt, /Zoom 2x into the circled area/);
+  assert.ok(request.prompt.includes(JSON.stringify(CIRCLE_ARROWS.strokes)));
+  assert.match(request.system, /no fixed shape vocabulary/);
+  assert.deepEqual(s.editor.previews[0].steps, [{ command: "clip.zoomRegion", params: { clip: 12, region: ZOOM.region, factor: 2 } }]);
+  assert.equal(s.editor.revision, 5);
+  await s.call("/chat/accept", {});
+  assert.equal(s.editor.history.length, 1);
+  assert.equal(s.editor.ink.at(-1), null);
+});
+
+test("zoom rejects invented or non-current targets, hostile regions and magnification", () => {
+  const snap = { clips: new Map([[12, {clip: 12, track: "V1"}], [10, {clip: 10, track: "V1"}], [13, {clip: 13, track: "A1"}]]) };
+  for (const x of [{...ZOOM, clip: 10}, {...ZOOM, clip: 99}, {...ZOOM, clip: 13}, {...ZOOM, factor: NaN},
+    {...ZOOM, factor: 5}, {...ZOOM, region: [0.8, 0, 0.2, 1]}, {...ZOOM, region: [0, 0, 0.01, 1]},
+    {...ZOOM, region: [0, 0, 1, 2]}, {...ZOOM, region: [0, 0, 1]}, {...ZOOM, region: [0, Infinity, 1, 1]}]) {
+    assert.throws(() => validateAction(A(x), snap, {clip: 12}));
+  }
+  assert.throws(() => validateAction(A(ZOOM), snap));
+});
+
+test("zoom refuses a moved frame before calling the model and a changed drawing during inference", async (t) => {
+  const s = await setup(); t.after(s.close);
+  await s.call("/ink", CIRCLE_ARROWS);
+  s.editor.playhead += F;
+  let r = await s.call("/chat", {message: "zoom 2x here"});
+  assert.match(r.body.reply, /frame or project changed/);
+  assert.equal(s.proxy.prompts.length, 0);
+  s.editor.playhead -= F;
+  const open = s.proxy.hold();
+  s.proxy.answers.push(ZOOM);
+  const result = s.call("/chat", {message: "zoom 2x here"});
+  while (!s.proxy.prompts.length) await new Promise(r => setTimeout(r, 5));
+  await s.call("/ink", {...CIRCLE_ARROWS, strokes: [[[0.7, 0.8], [0.8, 0.9]]]});
+  open();
+  r = await result;
+  assert.match(r.body.reply, /drawing, frame or project changed/);
+  assert.equal(s.editor.previews.length, 0);
+});
+
+test("review explanation and freehand use the same multimodal path; reject preserves project", async (t) => {
+  const s = await setup(); t.after(s.close);
+  await s.call("/ink", CIRCLE_ARROWS);
+  const stop = await s.call("/review/stop", {});
+  s.proxy.answers.push(ZOOM);
+  const r = await s.call("/review/note", {moment: stop.body.moment, transcript: "stop, zoom twice into the circled subject"});
+  assert.match(r.body.reply, /Preview ready/);
+  assert.match(s.proxy.prompts[0].prompt, /Review note.*zoom twice/);
+  assert.ok(s.proxy.prompts[0].images.length);
+  await s.call("/chat/reject", {});
+  assert.equal(s.editor.revision, 5);
+  assert.equal(s.editor.history.length, 0);
+  assert.equal(s.editor.ink.at(-1), null);
+});
+
+test("deciding a sketch preserves newer ink, and repeated consumed camera ink never pauses resumed playback", async (t) => {
+  const s = await setup(); t.after(s.close);
+  await s.call("/ink", CIRCLE_ARROWS);
+  s.proxy.answers.push(ZOOM);
+  await s.call("/chat", {message: "zoom twice here"});
+  const fresh = [[0.7, 0.8], [0.8, 0.9]];
+  await s.call("/ink", {...CIRCLE_ARROWS, strokes: [...CIRCLE_ARROWS.strokes, fresh]});
+  await s.call("/chat/reject", {});
+  assert.deepEqual(s.editor.ink.at(-1).strokes, [fresh]);
+  await s.call("/ink", {pointer: null, strokes: [], drawing: false});
+  await s.call("/ink", CIRCLE_ARROWS);
+  s.proxy.answers.push(ZOOM);
+  await s.call("/chat", {message: "zoom twice here"});
+  await s.call("/chat/accept", {});
+  const before = s.editor.ui.length;
+  for (let i = 0; i < 3; i++) await s.call("/ink", CIRCLE_ARROWS);
+  assert.equal(s.editor.ui.length, before, "consumed ink must not trigger another pause");
+  assert.deepEqual(s.editor.ink.at(-1).strokes, []);
+});
+
+
+test("sketch refuses a monitor picture still showing an older frame or revision", async (t) => {
+  const s = await setup(); t.after(s.close);
+  await s.call("/ink", CIRCLE_ARROWS);
+  s.editor.monitorFrame = 1;
+  let r = await s.call("/chat", {message: "zoom twice here"});
+  assert.match(r.body.reply, /hasn't rendered this frame/);
+  s.editor.monitorFrame = null;
+  s.editor.monitorRevision = 4;
+  r = await s.call("/chat", {message: "zoom twice here"});
+  assert.match(r.body.reply, /hasn't rendered this frame/);
+  assert.equal(s.proxy.prompts.length, 0);
+  assert.equal(s.editor.shots.length, 0);
+});
+
+test("assistant stages runtime-approved effect tools as one multi-command preview; navigation does not edit", async (t) => {
+  const s = await setup(); t.after(s.close);
+  s.proxy.answers.push({action:"edit",reply:"Blur this clip.",steps:[{command:"effects.apply",clips:[12],argsJson:'{"effect":"gaussian_blur"}'},{command:"effects.setParam",clips:[12],argsJson:'{"effect":"gaussian_blur","param":"radius","value":12}'}]});
+  const r=await s.call("/chat",{message:"blur the current clip"});
+  assert.match(r.body.reply,/Preview ready/);
+  assert.deepEqual(s.editor.previews[0].steps.map(s => s.params.id), ["effects.apply","effects.setParam"]);
+  assert.match(s.proxy.prompts[0].prompt,/APPROVED EDITING TOOLS/);
+  await s.call("/chat/accept",{});
+  assert.equal(s.editor.history.length,1);
+  s.proxy.answers.push({action:"navigate",reply:"Moved one frame.",operation:"step",value:1});
+  await s.call("/chat",{message:"step one frame"});
+  assert.equal(s.editor.history.length,1);
+  assert.equal(s.editor.playhead,401*F);
+});
+
+test("assistant tool input rejects arbitrary commands, implicit targets and target injection", () => {
+  const snap={clips:new Map([[12,{clip:12,track:"V1"}]]),tools:[{id:"effects.apply",args:["effect"]}]};
+  for(const step of [{command:"file.exportMedia",clips:[12],argsJson:'{}'}, {command:"effects.apply",clips:[],argsJson:'{}'},
+    {command:"effects.apply",clips:[12],argsJson:'{"effect":"blur","clip":99}'}, {command:"effects.apply",clips:[99],argsJson:'{}'},
+    {command:"effects.apply",clips:[12],argsJson:'[]'}, {command:"effects.apply",clips:[12],argsJson:'bad'}]) assert.throws(()=>validateAction(A({action:"edit",reply:"x",steps:[step]}),snap));
+});
+
+test("staged transition is rendered and visually inspected before acceptance; temporal evidence expires on decision", async(t)=>{
+  const s=await setup();t.after(s.close);
+  await s.call("/ink",SKETCH);
+  s.proxy.answers.push({action:"transition",reply:"Split these shots.",from:10,to:12,effect:"split",direction:"none"});
+  const r=await s.call("/chat",{message:"split into the next shot"});
+  assert.equal(r.body.pending.rendered,true);
+  assert.equal(s.editor.renders.length,5);
+  assert.equal(s.proxy.prompts[1].images.length,5);
+  assert.match(s.proxy.prompts[1].system,/chronological order/);
+  const p=await s.call("/chat/preview");assert.equal(p.status,200);assert.equal(p.body.frames.length,5);
+  assert.equal(s.editor.history.length,0);
+  await s.call("/chat/reject",{});
+  assert.equal((await s.call("/chat/preview")).status,409);
+  assert.equal(s.editor.revision,5);
+});
+
+test("failed visual transition review cancels staging and offers no acceptance",async(t)=>{
+  const s=await setup();t.after(s.close);
+  await s.call("/ink",SKETCH);
+  s.proxy.answers.push({action:"transition",reply:"Split.",from:10,to:12,effect:"split",direction:"none"},{ok:false,summary:"The frames do not show the requested direction."});
+  const r=await s.call("/chat",{message:"split to the next shot"});
+  assert.match(r.body.reply,/rendered transition needs clarification/);
+  assert.equal(r.body.pending,null);assert.equal(s.editor.proposal,null);assert.equal(s.editor.history.length,0);
 });

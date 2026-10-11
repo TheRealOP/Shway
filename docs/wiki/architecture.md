@@ -93,6 +93,32 @@ in the staged session at the clip's in or out edge. Only `split`, `push` and `ir
 clip on both sides of the cut), so a fade to or from nothing is refused. After a `timeline.move` in
 the same proposal the moved clip keeps its id, so the transition can name it.
 
+### Region zoom step
+
+`clip.zoomRegion {clip, region:[left,top,right,bottom], factor}` is a bounded proposal step.
+It composes a relative output-frame zoom into existing Motion via `effects.setParam`, keeping
+rotation, anchor, nonuniform proportions and scale-to-frame behavior. The selected rectangle's
+center maps to output-frame center. Only the explicit video target changes; linked audio is
+validated and preserved. Animated/disabled Motion is refused. Finite normalized rectangles must
+be ≥0.02 wide/high, factor >1 and ≤4, and resulting scale ≤4000% and position within ±1 million px.
+The step inherits target locks, source validation, stale checks, preview/cancel/commit and history.
+See [drawing contract](interactions.md#freehand-drawing--explanation-2026-10-11).
+
+### Ordinary command batch and rendered inspection
+
+`proposal.tools` exposes an audited registry subset with allowed target-free argument fields and
+effect parameter definitions. `editor.command {id, clips, args}` is a typed proposal step, not an
+arbitrary execution endpoint. `proposals/tools.rs` rejects unknown commands/arguments, caps inputs,
+binds targets, checks effect values and locked linked tracks, then uses `Session::execute` only
+inside the disposable candidate. The ordinary registry continues to own edit semantics. A failed
+step discards the entire candidate; commit publishes one normal undo step.
+
+The assistant renders five bounded candidate frames via `proposal.render`, encodes their RGBA
+buffers as PNG and sends the ordered images/times to vision. Inspection never seeks the live
+playhead or commits the project. Render/vision failure cancels the token; freshness is checked
+after inspection and again before serving images or accepting. The review page shows those same
+timed still frames. See [tool and inspection contract](interactions.md#ordinary-tools-and-transition-inspection).
+
 ### First-cut assembly (DEV-90 engine slice)
 
 A `timeline.place` proposal step takes `ranges: [{item, sourceIn, sourceOut}]` (exact source ticks)

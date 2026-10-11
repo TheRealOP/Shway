@@ -177,7 +177,7 @@ test("generate forwards one inline image before the prompt", async () => {
 test("generate refuses bad or oversized images before calling Gemini", async () => {
   const s = await serve();
   const png = (data) => ({ mimeType: "image/png", data });
-  for (const images of [{}, "x", [png("AAAA"), png("AAAA")], [{ mimeType: "image/gif", data: "AAAA" }], [png("")], [png("not base64!")],
+  for (const images of [{}, "x", Array.from({length:9}, () => png("AAAA")), [{ mimeType: "image/gif", data: "AAAA" }], [png("")], [png("not base64!")],
     [{ ...png("AAAA"), name: "x" }], [null]]) {
     assert.equal((await s.call("/generate", { body: { prompt: "p", images } })).status, 400, JSON.stringify(images));
   }
@@ -185,5 +185,15 @@ test("generate refuses bad or oversized images before calling Gemini", async () 
   assert.equal((await s.call("/generate", { body: { prompt: "p", images: [png("A".repeat(8.5 * 1024 * 1024))] } })).status, 413);
   assert.equal((await s.call("/generate", { body: { prompt: "p", images: [png("A".repeat(7 * 1024 * 1024))] } })).status, 200);
   assert.equal(s.seen.length, 1);
+  await s.close();
+});
+
+
+test("generate supports ordered temporal images but caps their combined bytes", async () => {
+  const s = await serve();
+  const png = data => ({mimeType: "image/png", data});
+  assert.equal((await s.call("/generate", {body: {prompt: "inspect timed frames", images: [png("AAAA"), png("BBBB"), png("CCCC")]}})).status, 200);
+  assert.deepEqual(s.seen[0].body.contents[0].parts.slice(0,3).map(p => p.inlineData.data), ["AAAA","BBBB","CCCC"]);
+  assert.equal((await s.call("/generate", {body: {prompt: "x", images: [png("A".repeat(5 * 1024 * 1024)), png("A".repeat(5 * 1024 * 1024))]}})).status, 413);
   await s.close();
 });

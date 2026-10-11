@@ -2664,6 +2664,7 @@ fn build() -> Vec<CommandSpec> {
             r#"{"kind":"Video"|"Audio"|"VideoTransition"|"AudioTransition"?,"folder":"Video Transitions/Wipe"?,"detail":bool?}"#,
             |_, p| Ok(list_effects(p))
         ),
+        query!("proposal.tools", "Safe Assistant Editing Tools", "{}", |s, _| Ok(crate::proposals::tool_catalog(s))),
         query!("history.list", "List History", "{}", |s, _| Ok(
             json!({"undo": s.history.undo.iter().map(|h| &h.0).collect::<Vec<_>>(), "redo": s.history.redo.iter().map(|h| &h.0).collect::<Vec<_>>()})
         )),

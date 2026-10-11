@@ -337,3 +337,33 @@ test("cut and edit navigation require the engine to offer them", async () => {
   assert.throws(() => adapter.cut(), code("capability"));
   assert.throws(() => adapter.nextEdit(), code("capability"));
 });
+
+test("zoom region is bounded before dispatch", async () => {
+  const {transport, calls} = fixture();
+  const adapter = await ShwayAdapter.connect(transport);
+  const params = {clip: 23, region: [0.1, 0.2, 0.4, 0.6], factor: 2};
+  await adapter.preview({...proposal(), steps: [{command: "clip.zoomRegion", params}]});
+  assert.deepEqual(calls.find(c => c.command === "proposal.preview")?.params.steps, [{command: "clip.zoomRegion", params}]);
+  const before = calls.length;
+  for (const bad of [
+    {...params, factor: NaN}, {...params, factor: Infinity}, {...params, factor: 1}, {...params, factor: 4.01},
+    {...params, region: [0, 0, 1]}, {...params, region: [0, 0, 1, 2]}, {...params, region: [0.4, 0, 0.2, 1]},
+    {...params, region: [0, 0, 0.01, 1]}, {...params, region: [0, NaN, 1, 1]}, {...params, clip: 0}, {...params, command: "anything"},
+  ]) await assert.rejects(adapter.preview({...proposal(), steps: [{command: "clip.zoomRegion", params: bad}]} as EditProposal), code("invalid"));
+  assert.equal(calls.length, before);
+});
+
+test("generic command envelopes are bounded and still use the staged proposal endpoint", async () => {
+  const {transport, calls} = fixture();
+  const adapter = await ShwayAdapter.connect(transport);
+  const params = {id: "effects.setParam", clips: [23], args: {effect: "motion", param: "scale", value: 120}};
+  await adapter.preview({...proposal(), steps: [{command: "editor.command", params}]});
+  assert.deepEqual(calls.find(c => c.command === "proposal.preview")?.params.steps, [{command: "editor.command", params}]);
+  await adapter.preview({...proposal(), steps: [{command: "editor.command", params: {id: "clip.nudgeVolumeUp3", clips: [23], args: {}}}]});
+  const before = calls.length;
+  for (const bad of [
+    {...params, id: "bad command"}, {...params, clips: []}, {...params, clips: [23,23]},
+    {...params, args: null}, {...params, args: {text: "x".repeat(9000)}}, {...params, extra: true},
+  ]) await assert.rejects(adapter.preview({...proposal(), steps: [{command: "editor.command", params: bad}]} as EditProposal), code("invalid"));
+  assert.equal(calls.length, before);
+});

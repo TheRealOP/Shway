@@ -108,3 +108,56 @@ Remove protected upstream branding from modified distributions.
 - **Verified:** 16 assistant tests + 5 review tests (`node --test`); removing the stale-revision check or the resume seek fails tests.
 - **Verified live** (release `filmcraft --demo --control 9881`, assistant :8799, Gemini proxy :8790): `/review/stop` paused and returned `{revision, playhead, clip}`; playback stayed paused; `/review/transport` step moved the playhead 24 frames; `/review/note` reached Gemini with "Review note at 1.29 s on clip 29, marking 1.29–2.29 s: …" shown in `/chat/state`; nothing was applied (revision unchanged).
 - **Not verified:** a committed review proposal live (the demo project's sync-locked tracks made the engine refuse remove/trim; a remove refusal surfaces as 502, pre-existing /chat behaviour), resume-after-accept against the real editor (tests only), the page in a browser, camera, microphone and transcription.
+
+
+## Freehand intent and region zoom, 2026-10-11
+
+The assistant now interprets ordered normalized freehand strokes, Program monitor PNG, current
+project/frame context and the creator's explanation in one vision request. No shape classifier
+precedes the explanation. See the [contract](interactions.md#freehand-drawing--explanation-2026-10-11).
+
+- Verified: local fake-editor/fake-model HTTP/TCP integration for circle + arrows + “zoom 2x”,
+  typed chat and transcribed review note, supported transition choice from explanation,
+  clarification without staging, hostile output/region/amount/target refusal, changed frame before
+  inference, changed ink during inference, stale rendered-monitor refusal, acceptance/rejection and consuming only submitted ink.
+  Repeated consumed camera ink does not pause resumed playback.
+- Verified: Rust proposal tests stage a real Motion edit without publishing it, render a candidate,
+  commit one history step, preserve linked audio, serialize/reopen, undo/cancel and reject stale,
+  locked, audio and animated targets. The expanded render test checks that zoom changes pixels,
+  accepted pixels match the candidate, and a region center maps to output center with pre-existing
+  rotation, anchor and nonuniform scale.
+- Limitations: the model tests use fixed responses; live vision interpretation of a camera sketch,
+  creator footage, desktop screenshot/render timing and an exported zoom remain unverified.
+  Zoom is static for the entire current clip, factor >1 and ≤4; animated/disabled Motion requires
+  detailed controls. Unsupported commands/parameters ask for clarification instead of executing.
+- The original checkout was inspected read-only: clean at 13a74ba and older than this worktree's
+  drawing implementation (8e13aaa). No original-checkout files were changed. Linear status was
+  read (DEV-93 Done, DEV-113 In Progress); no task status was changed.
+
+## Ordinary tools and timed transition inspection, 2026-10-11
+
+- Verified: runtime registry count of 62 approved generic commands; 57 / 89 core project-editing
+  command entries, including aliases, with 32 explicit state/preferences/external-file exclusions
+  from the 121 journaled core entries; 180 applicable video/audio effects. See the
+  [coverage definition](interactions.md#ordinary-tools-and-transition-inspection).
+- Verified: Rust stage/commit/one-step undo for effects, parameter animation/keyframes, gain,
+  speed/reverse, framing, split/slip, nudges/volume, text/shapes and captions. Hostile tool names,
+  file/preferences commands, target injection, values, effect IDs and sizes are refused. Existing
+  batch atomicity and stale-token tests remain green; generic second-step failure leaves no
+  candidate/history change, and a locked linked audio target blocks a volume command.
+- Verified: synthetic Rust transition renders at five valid times without changing live playhead
+  or project; pixels vary over time and match the committed render, then Undo restores the base.
+  Fixed-model HTTP/TCP tests verify ordered frames sent to vision, inspection evidence returned
+  to the user, and cancellation on rejected/invalid visual review. PNG pixels round-trip exactly.
+- Verified: review page inspected in the in-app browser against a loopback mock endpoint containing
+  actual synthetic Rust-rendered PNGs. Frame strip, image, timestamp and sampled-frame label render;
+  this is UI fixture evidence, not live editor/provider evidence. Camera/microphone were not used.
+- Not verified: live model quality, camera sketch, real creator footage, continuous transition
+  motion/audio, or a new source-to-export run for this slice. Sparse frames only sample appearance.
+
+Final gates actually run: `cargo test -p filmcraft-engine` (461 passed, 3 ignored benchmarks);
+`cargo clippy -p filmcraft-engine --all-targets -- -D warnings`; `cargo fmt --check`;
+`cargo xtask wasm` (42 crates), `cargo xtask layers`, `cargo xtask assets` (60 attributed assets);
+`node --test shway/*.test.ts shway/*.test.mjs surface/*.test.mjs surface/gestures/*.test.mjs surface/voice/*.test.mjs`
+(193 passed). Relative documentation links and `git diff --check` checked. Full workspace CI was
+not run. No Linear status change was made during verification.
