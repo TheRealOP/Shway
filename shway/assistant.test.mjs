@@ -7,12 +7,13 @@ import { createAssistant, fit, validateAction } from "./assistant.mjs";
 
 const TPS = 254016000000, F = TPS / 30;
 const REQUIRED = ["project.inspect", "sequence.inspect", "timeline.select", "playhead.set", "edit.undo", "file.exportMedia", "jobs.list",
-  "proposal.preview", "proposal.inspect", "proposal.cancel", "proposal.commit", "proposal.render", "transcript.inspect"];
+  "proposal.preview", "proposal.inspect", "proposal.cancel", "proposal.commit", "proposal.render", "transcript.inspect",
+  "playhead.step", "playhead.nextEdit", "playhead.prevEdit"];
 
 const clip = (clip, item, link, start, dur, sourceIn, name) => ({ clip, item, link, name, start: start * F, duration: dur * F, sourceIn: sourceIn * F, sourceOut: (sourceIn + dur) * F });
 
 function fakeEditor() {
-  const st = { revision: 5, proposal: null, next: 1, history: [], previews: [], onPreview: null };
+  const st = { revision: 5, proposal: null, next: 1, history: [], previews: [], onPreview: null, playhead: 400 * F, playing: true, ui: [] };
   const seq = () => ({
     id: 27, name: "Cut", duration: 450 * F, settings: { frame_rate: { num: 30, den: 1 } }, playhead: 0, selection: [],
     video: [{ id: 1, locked: false, items: [clip(10, 1, 1, 0, 300, 30, "C5500.MP4"), clip(12, 2, 2, 300, 150, 0, "C5517.MP4")] }],
@@ -22,6 +23,8 @@ function fakeEditor() {
     switch (command) {
       case "project.inspect": return { revision: st.revision, activeSequence: 27, root: { children: [{ item: 1, type: "Movie", duration: 1000 * F }, { item: 2, type: "Movie", duration: 150 * F }] } };
       case "sequence.inspect": return seq();
+      case "playhead.set": st.ui.push(["seek", p.time]); st.playhead = p.time; return {};
+      case "playhead.step": st.playhead += p.frames * F; return {};
       case "transcript.inspect": return { words: [{ text: "hello", clip: 10 }, { text: "we're", clip: 13 }, { text: "at", clip: 13 }, { text: "Chili's", clip: 13 }] }; // words land on the audio half
       case "proposal.preview": {
         st.onPreview?.();
@@ -53,7 +56,9 @@ function fakeEditor() {
         const req = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1);
         let reply;
         try {
-          const result = req.method === "engine.commands" ? REQUIRED.map((id) => ({ id })) : exec(req.params.command, req.params.params);
+          const result = req.method === "engine.commands" ? REQUIRED.map((id) => ({ id })) : req.method === "ui.inspect" ? { playhead: st.playhead }
+            : req.method === "ui.playback" ? (st.ui.push([req.params.action, req.params.speed]), st.playing = req.params.action === "play", { playing: st.playing, playhead: st.playhead })
+            : exec(req.params.command, req.params.params);
           reply = { id: req.id, ok: true, result };
         } catch (e) { reply = { id: req.id, ok: false, error: e.message }; }
         sock.write(JSON.stringify(reply) + "\n");
@@ -94,7 +99,7 @@ async function setup(opts = {}) {
     return { status: r.status, body: await r.json() };
   };
   const close = () => { for (const s of [editor.server, proxy.server, app]) { s.closeAllConnections?.(); s.close(); } };
-  return { editor: editor.st, proxy, call, close };
+  return { editor: editor.st, proxy, call, close, port };
 }
 
 test("answer: state keeps the conversation; the model sees project data incl. transcript text", async (t) => {
@@ -285,4 +290,68 @@ test("validateAction: extra fields, missing fields, ids, handles", () => {
   assert.equal(validateAction(A(trim({ edge: "in", direction: "extend", amount: 30 })), snap).deltaFrames, -30);
   assert.equal(validateAction(A(trim({ direction: "extend", amount: 2, unit: "seconds" })), snap).deltaFrames, 60);
   assert.deepEqual(validateAction({ action: "answer", reply: " hi ", trim: null }, snap), { action: "answer", reply: "hi" });
+});
+
+// ---- Review playback (DEV-113)
+test("review: stop captures the moment; a note binds to it, previews, accept commits and resumes", async (t) => {
+  const s = await setup(); t.after(s.close);
+  let r = await s.call("/review/stop", {});
+  assert.deepEqual(r.body, { moment: { revision: 5, playhead: 400 * F, clip: 12 } });
+  assert.equal(s.editor.playing, false);
+  s.proxy.answers.push({ action: "remove", reply: "Removing that clip.", clips: [12] });
+  r = await s.call("/review/note", { moment: r.body.moment, transcript: "this part drags, cut it", gestures: [{ type: "engage" }] });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body.pending, { token: 1, label: "Remove C5517.MP4" });
+  assert.equal((await s.call("/chat/state")).body.messages[0].text, "Review note at 13.33 s on clip 12: this part drags, cut it");
+  assert.match(s.proxy.prompts[0].prompt, /Review note at 13\.33 s on clip 12/);
+  assert.equal(s.editor.history.length, 0); // nothing applied without acceptance
+  await s.call("/chat/accept", {});
+  assert.deepEqual(s.editor.history, ["Remove C5517.MP4"]);
+  assert.equal(s.editor.playing, true);
+});
+
+test("review: a scrub while talking marks a range; reject returns to the moment and plays", async (t) => {
+  const s = await setup(); t.after(s.close);
+  const { moment } = (await s.call("/review/stop", {})).body;
+  assert.equal((await s.call("/review/transport", { event: { type: "step", frames: 30 } })).status, 200);
+  s.proxy.answers.push({ action: "trim", reply: "ok", clip: 12, edge: "in", direction: "shorten", amount: 1, unit: "seconds" });
+  await s.call("/review/note", { moment, transcript: "from here to here is dead air", gestures: [{ type: "step" }] });
+  assert.match(s.proxy.prompts[0].prompt, /marking 13\.33–14\.33 s: from here to here is dead air/);
+  await s.call("/chat/reject", {});
+  assert.deepEqual(s.editor.ui.slice(-2), [["seek", 400 * F], ["play", undefined]]);
+  assert.equal(s.editor.history.length, 0);
+});
+
+test("review: stale moment is a clear 409 shown in chat; cancel resumes", async (t) => {
+  const s = await setup(); t.after(s.close);
+  const { moment } = (await s.call("/review/stop", {})).body;
+  s.editor.revision++;
+  const r = await s.call("/review/note", { moment, transcript: "cut this" });
+  assert.equal(r.status, 409);
+  assert.match(r.body.error, /changed since you stopped playback.*Nothing changed/);
+  assert.equal(s.editor.previews.length, 0);
+  assert.match((await s.call("/chat/state")).body.messages.at(-1).text, /changed since you stopped/);
+  assert.deepEqual((await s.call("/review/cancel", {})).body, { resumed: true });
+  assert.equal(s.editor.playing, true);
+});
+
+test("review transport and HTTP boundary: bridge drives playback; chop, hostile input refused; CORS preflight", async (t) => {
+  const s = await setup(); t.after(s.close);
+  assert.equal((await s.call("/review/transport", { event: { type: "shuttle", rate: -2 } })).status, 200);
+  assert.deepEqual(s.editor.ui.at(-1), ["play", -2]);
+  await s.call("/review/transport", { event: { type: "shuttle", rate: 0 } });
+  assert.equal(s.editor.playing, false);
+  assert.equal((await s.call("/review/transport", { event: { type: "chop" } })).body.error, "chop is a cut: POST /review/cut");
+  for (const event of [null, { type: "rm" }, { type: "shuttle", rate: 1e9 }, { type: "step", frames: 0.5 }, { type: "swipe", direction: "up" }])
+    assert.equal((await s.call("/review/transport", { event })).status, 400, JSON.stringify(event));
+  assert.equal((await s.call("/review/stop", { x: 1 })).status, 400);
+  const m = { revision: 5, playhead: 0, clip: null };
+  for (const b of [{ transcript: "x" }, { moment: { ...m, extra: 1 }, transcript: "x" }, { moment: { ...m, playhead: -1 }, transcript: "x" },
+    { moment: m, transcript: "" }, { moment: m, transcript: "x", gestures: [1] }, { moment: m, transcript: "x", gestures: Array(65).fill({ type: "a" }) }])
+    assert.equal((await s.call("/review/note", b)).status, 400, JSON.stringify(b));
+  assert.equal(s.proxy.prompts.length, 0);
+  const pre = await fetch(`http://127.0.0.1:${s.port}/review/note`, { method: "OPTIONS", headers: { origin: "http://127.0.0.1:8771" } });
+  assert.equal(pre.status, 204);
+  assert.equal(pre.headers.get("access-control-allow-origin"), "http://127.0.0.1:8771");
+  assert.equal((await fetch(`http://127.0.0.1:${s.port}/review/note`, { method: "OPTIONS", headers: { origin: "https://evil.example" } })).status, 403);
 });

@@ -77,3 +77,7 @@ The panel loads these modules from the dist root. When a module is missing, it s
 ## Status and evidence
 
 See [acceptance](../docs/wiki/acceptance.md) for the dated status line.
+
+## Review remote (DEV-113)
+
+`review.html` + `review.mjs` (tests: `node --test surface/review.test.mjs`): camera/mic remote for reviewing in the desktop editor. Serve `python3 -m http.server -d surface 8771 --bind 127.0.0.1`, run `node shway/assistant.mjs`, open `http://127.0.0.1:8771/review.html`. Hold V / the button / a still pinch = stop + talk; release sends one note bound to the stopped moment; scrub (V held + pinch-twist) to mark a range; Esc / Resume cancels and plays on; transport gestures go to `/review/transport`, chop to `/review/cut` (DEV-114). Accept/reject in the editor chat panel; both resume playback. `window.shwayReview.{gesture, say}` drive it without camera/mic. Status: [acceptance](../docs/wiki/acceptance.md).

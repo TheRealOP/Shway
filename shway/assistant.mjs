@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { allowedOrigin } from "./gemini-server.mjs";
 import { AdapterError, ShwayAdapter, binItem } from "./adapter.ts";
 import { geminiGenerate, jevDecide, proposeReplacement } from "./replace.ts";
+import { createBridge } from "../surface/gestures/bridge.mjs";
 
 const TPS = 254016000000;
 const MAX_BODY = 64 * 1024;
@@ -203,10 +204,12 @@ export function createAssistant({ editor = "127.0.0.1:9876", proxy = "http://127
     return { action: "answer", reply: `Sorry, I couldn't turn that into an edit I can make (${error}). Nothing changed.` };
   }
 
-  async function chat(message) {
+  /** @param {{revision: number, clip: number | null}} [review] the moment a review note is bound to */
+  async function chat(message, review) {
     const a = await getAdapter();
     if (pending) { await a.cancel(pending.token).catch(() => {}); pending = null; } // the engine holds one preview
     const snap = await snapshot(a, transport);
+    if (review && snap.project.revision !== review.revision) throw new HttpError(409, `The project changed since you stopped playback (revision ${review.revision}, now ${snap.project.revision}), so I didn't act on that note. Nothing changed. Stop again and re-explain.`);
     const act = await interpret(message, snap);
     const name = (id) => cut(String(snap.clips.get(id)?.name || `clip ${id}`), 40);
     // Code maps the validated action to one proposal step; the model never names engine commands.
@@ -237,7 +240,7 @@ export function createAssistant({ editor = "127.0.0.1:9876", proxy = "http://127
         if (!Array.isArray(takes) || !takes.length) return "There is no take index for this project yet, so I can't swap takes. Nothing changed.";
         const jev = await fetch(`${proxy}/health`).then((r) => r.json()).then((h) => h?.jev === true, () => false);
         const r = await proposeReplacement({ transcript: act.correction, takes, adapter: a,
-          context: { revision: snap.project.revision, sequence: snap.sequence.id, selection: snap.view.selection },
+          context: { revision: snap.project.revision, sequence: snap.sequence.id, selection: review?.clip != null ? [review.clip] : snap.view.selection },
           ...(jev ? { decide: jevDecide(proxy) } : { generate }) });
         if (r.status !== "preview") return `${r.message} Nothing changed.`;
         pending = { token: r.token, label: r.label };
@@ -262,6 +265,47 @@ export function createAssistant({ editor = "127.0.0.1:9876", proxy = "http://127
     }
   }
 
+  // ---- Review playback (DEV-113): stop captures a moment; the next explanation is one note bound to it.
+  // Transport/stop/cancel skip the busy lock so scrubbing works while the model thinks.
+  let moment = null, bridge = null, bridgeError = null;
+  async function review(route, body) {
+    const a = await getAdapter();
+    if (route === "/review/stop") {
+      await a.stop();
+      const { project, sequence } = await a.inspect();
+      if (!sequence) throw new HttpError(409, "There is no open sequence in the editor.");
+      const playhead = await a.playhead();
+      moment = { revision: project.revision, playhead, clip: clipAt(sequence, playhead) };
+      return { moment };
+    }
+    if (route === "/review/cancel") { await resume(true); return { resumed: true }; }
+    bridge ??= createBridge(a, { onError: (e) => { bridgeError = e; } });
+    bridgeError = null;
+    await bridge(body.event);
+    if (bridgeError) throw new HttpError(502, `${body.event.type}: ${bridgeError.message ?? bridgeError}`);
+    return { ok: true };
+  }
+  /** Stops playback and words the note with its moment and any range the creator scrubbed while talking. */
+  async function reviewMessage({ moment: m, transcript, gestures }) {
+    const a = await getAdapter();
+    await a.stop();
+    const now = await a.playhead();
+    if (now !== m.playhead) await a.seekTicks(m.playhead); // edits that use the playhead (insert_take) act at the moment
+    moment = m;
+    const marked = now !== m.playhead && gestures.some((g) => ["shuttle", "step", "swipe"].includes(g.type));
+    const range = marked ? `, marking ${sec(Math.min(m.playhead, now))}–${sec(Math.max(m.playhead, now))} s` : "";
+    return `Review note at ${sec(m.playhead)} s${m.clip != null ? ` on clip ${m.clip}` : ""}${range}: ${transcript}`;
+  }
+  /** After accept, reject or cancel: play on (reject/cancel first return to the stopped moment). */
+  async function resume(back) {
+    if (!moment) return;
+    const m = moment;
+    moment = null;
+    const a = await getAdapter();
+    if (back) await a.seekTicks(m.playhead).catch(() => {});
+    await a.play();
+  }
+
   return createServer(async (req, res) => {
     const origin = req.headers.origin;
     const send = (status, value) => {
@@ -271,9 +315,13 @@ export function createAssistant({ editor = "127.0.0.1:9876", proxy = "http://127
     const state = () => ({ pending, busy });
     try {
       if (!allowedOrigin(origin)) throw new HttpError(403, "origin not allowed");
+      if (req.method === "OPTIONS") {
+        res.writeHead(204, { "access-control-allow-origin": origin ?? "*", "access-control-allow-methods": "POST, GET", "access-control-allow-headers": "content-type", vary: "origin" });
+        return res.end();
+      }
       if (req.method === "GET" && req.url === "/chat/state") return send(200, { messages, ...state() });
-      const route = req.method === "POST" && ["/chat", "/chat/accept", "/chat/reject"].includes(req.url) ? req.url : null;
-      if (!route) throw new HttpError(404, "use GET /chat/state or POST /chat, /chat/accept, /chat/reject");
+      const route = req.method === "POST" && (["/chat", "/chat/accept", "/chat/reject"].includes(req.url) || Object.hasOwn(REVIEW, req.url)) ? req.url : null;
+      if (!route) throw new HttpError(404, `use GET /chat/state or POST /chat, /chat/accept, /chat/reject, ${Object.keys(REVIEW).join(", ")}`);
       let size = 0;
       const chunks = [];
       for await (const c of req) {
@@ -286,21 +334,29 @@ export function createAssistant({ editor = "127.0.0.1:9876", proxy = "http://127
       let body;
       try { body = text.trim() ? JSON.parse(text) : {}; } catch { throw new HttpError(400, "invalid JSON"); }
       if (!body || typeof body !== "object" || Array.isArray(body)) throw new HttpError(400, "body must be a JSON object");
-      const allowed = route === "/chat" ? ["message"] : [];
+      const allowed = route === "/chat" ? ["message"] : REVIEW[route] ?? [];
       for (const k of Object.keys(body)) if (!allowed.includes(k)) throw new HttpError(400, `unsupported field ${k}`);
       if (route === "/chat" && (typeof body.message !== "string" || !body.message.trim() || body.message.length > 2000)) throw new HttpError(400, "message must be 1–2000 characters");
+      if (route === "/review/transport") body = { event: readTransport(body.event) };
+      if (route === "/review/note") body = readNote(body);
+      if (route.startsWith("/review/") && route !== "/review/note") return send(200, await review(route, body));
       if (busy) throw new HttpError(409, "busy with the previous request; try again when it finishes");
       busy = true;
       try {
         let reply;
-        if (route === "/chat") {
-          say("user", body.message.trim());
-          try { reply = await chat(body.message.trim()); } catch (e) {
+        if (route === "/chat" || route === "/review/note") {
+          const message = route === "/chat" ? body.message.trim() : await reviewMessage(body);
+          say("user", message);
+          try { reply = await chat(message, route === "/review/note" ? body.moment : undefined); } catch (e) {
+            if (e instanceof HttpError) { say("assistant", e.message); throw e; }
             if (e instanceof UserError) reply = e.message;
             else if (stale(e)) reply = "The project changed while I was working on that, so nothing changed. Please send it again.";
             else { adapter = null; say("assistant", `Something went wrong: ${e.message}`); throw new HttpError(502, e.message); }
           }
-        } else reply = await decide(route === "/chat/accept");
+        } else {
+          reply = await decide(route === "/chat/accept");
+          await resume(route === "/chat/reject").catch(() => {}); // the decision stands even if the editor won't play
+        }
         say("assistant", reply);
         busy = false;
         return send(200, { reply, ...state() });
@@ -313,6 +369,40 @@ export function createAssistant({ editor = "127.0.0.1:9876", proxy = "http://127
 
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
+}
+
+// ---- Review routes (DEV-113): fields per route, and the boundary checks for their bodies.
+const REVIEW = { "/review/stop": [], "/review/cancel": [], "/review/transport": ["event"], "/review/note": ["moment", "transcript", "gestures"] };
+const TRANSPORT = ["engage", "shuttle", "step", "release", "cancel", "tracking-lost", "swipe", "double-tap"];
+const bad = (m) => { throw new HttpError(400, m); };
+const isObj = (v) => v && typeof v === "object" && !Array.isArray(v);
+
+/** A recognizer event (surface/gestures) for the bridge; chop is a cut and belongs to POST /review/cut. */
+export function readTransport(e) {
+  if (!isObj(e)) bad("event must be an object");
+  if (e.type === "chop") bad("chop is a cut: POST /review/cut");
+  if (!TRANSPORT.includes(e.type)) bad(`event.type must be one of ${TRANSPORT.join(", ")}`);
+  if (e.type === "shuttle" && !(typeof e.rate === "number" && Number.isFinite(e.rate) && Math.abs(e.rate) <= 8)) bad("shuttle rate must be a number within ±8");
+  if (e.type === "step" && !(Number.isSafeInteger(e.frames) && e.frames !== 0 && Math.abs(e.frames) <= 1000)) bad("step frames must be a nonzero integer within ±1000");
+  if (e.type === "swipe" && !["left", "right"].includes(e.direction)) bad("swipe direction must be left or right");
+  return { type: e.type, ...(e.type === "shuttle" && { rate: e.rate }), ...(e.type === "step" && { frames: e.frames }), ...(e.type === "swipe" && { direction: e.direction }) };
+}
+
+/** {moment: {revision, playhead, clip}, transcript, gestures?} as returned by /review/stop plus what was said. */
+export function readNote({ moment: m, transcript, gestures = [] }) {
+  if (!isObj(m) || Object.keys(m).some((k) => !["revision", "playhead", "clip"].includes(k))) bad("moment must be {revision, playhead, clip} from /review/stop");
+  if (!Number.isSafeInteger(m.revision) || m.revision < 0) bad("moment.revision must be a whole number");
+  if (!Number.isSafeInteger(m.playhead) || m.playhead < 0) bad("moment.playhead must be whole ticks");
+  if (m.clip !== null && !(Number.isSafeInteger(m.clip) && m.clip >= 0)) bad("moment.clip must be a clip id or null");
+  if (typeof transcript !== "string" || !transcript.trim() || transcript.length > 2000) bad("transcript must be 1–2000 characters");
+  if (!Array.isArray(gestures) || gestures.length > 64 || gestures.some((g) => !isObj(g) || typeof g.type !== "string" || g.type.length > 32)) bad("gestures must be at most 64 {type} objects");
+  return { moment: { revision: m.revision, playhead: m.playhead, clip: m.clip }, transcript: transcript.trim(), gestures: gestures.map((g) => ({ type: g.type })) };
+}
+
+/** The topmost video clip under the playhead, or null. */
+export function clipAt(sequence, t) {
+  for (const track of [...(sequence.video ?? [])].reverse()) for (const c of track.items ?? []) if (c.start <= t && t < c.start + c.duration) return c.clip;
+  return null;
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
