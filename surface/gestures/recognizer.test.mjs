@@ -23,6 +23,9 @@ const POSES = {
   fist: { curl: [8, 12, 16, 20], thumb: [-0.025, 0.075] }, // fingers curled onto the thumb
   point: { curl: [12, 16, 20], thumb: [-0.07, 0.06] }, // index out, thumb tucked away from the middle tip
   horns: { curl: [12, 16], thumb: [-0.014, 0.072] }, // 🤘: thumb holding the middle and ring tips
+  hornsThumbOut: { curl: [12, 16], thumb: [-0.09, 0.05] }, // 🤟-style: thumb sticking out sideways
+  hornsMiddleUp: { curl: [16], thumb: [-0.014, 0.072] }, // middle not down
+  hornsRingUp: { curl: [12], thumb: [-0.014, 0.072] }, // ring not down
 };
 const curled = ([px]) => [px * 0.5 - 0.02, 0.07];
 
@@ -97,6 +100,23 @@ test("only 🤘 engages: a pinch, a thumb–middle pinch, a point or a fist don'
   }
   assert.ok(!types(replay(frames(0, 600, () => ({ hand: hand({ pinch: true, twist: 40 }) })))).some((t) => t === "engage" || t === "shuttle"), "pinch + twist only draws");
   assert.equal(replay(frames(0, 100, () => ({ hand: hand({ pose: "horns" }) })))[0]?.type, "engage");
+});
+
+// Changed deliberately: live, the thumb-on-tips check kept 🤘 from registering. Only the four fingers count.
+test("🤘 engages whatever the thumb does; it needs middle and ring down", () => {
+  assert.equal(replay(frames(0, 100, () => ({ hand: hand({ pose: "hornsThumbOut" }) })))[0]?.type, "engage");
+  const r = createRecognizer();
+  r.step({ t: 0, hand: hand({ pose: "hornsThumbOut" }) });
+  assert.equal(r.view().hornsFingers, 4);
+  for (const pose of ["hornsMiddleUp", "hornsRingUp"]) {
+    assert.ok(!types(replay(frames(0, 600, () => ({ hand: hand({ pose, twist: 40 }) })))).includes("engage"), pose);
+  }
+  // Thumb swinging out mid-shuttle doesn't release.
+  const evs = replay([
+    { t: 0, hand: hand({ pose: "horns" }) },
+    ...frames(33, 600, () => ({ hand: hand({ pose: "hornsThumbOut", twist: 40 }) })),
+  ]);
+  assert.deepEqual([...new Set(types(evs))], ["engage", "shuttle"]);
 });
 
 test("shuttle rate is bounded at extreme twist", () => {
