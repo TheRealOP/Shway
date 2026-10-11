@@ -85,6 +85,14 @@ a pre-existing gap that would also close, a non-sync-locked partner track) rejec
 of desyncing. Both reuse `targets()` (explicit, unique, unlocked, synced A/V, ≤ 32) and count toward
 the reference cap (a move counts clip + anchor). Tests: `crates/engine/src/proposals/tests.rs`.
 
+### Transition step (DEV-93 sketch → edit)
+
+`sequence.applyVideoTransition {clip, effect, edge, direction?}` runs the engine command of that name
+in the staged session at the clip's in or out edge. Only `split`, `push` and `iris_round` are allowed
+(`direction` left/right, push only); the default duration applies. The result must be two-sided (a
+clip on both sides of the cut), so a fade to or from nothing is refused. After a `timeline.move` in
+the same proposal the moved clip keeps its id, so the transition can name it.
+
 ### First-cut assembly (DEV-90 engine slice)
 
 A `timeline.place` proposal step takes `ranges: [{item, sourceIn, sourceOut}]` (exact source ticks)

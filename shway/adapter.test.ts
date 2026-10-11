@@ -255,6 +255,23 @@ test("remove and move steps pass exact explicit IDs and reject hostile shapes be
   assert.equal(calls.length, before);
 });
 
+test("transition steps pass the allowlisted effect and reject hostile shapes before dispatch", async () => {
+  const {transport, calls} = fixture();
+  const adapter = await ShwayAdapter.connect(transport);
+  const move = {command: "timeline.move", params: {clip: 23, anchor: 21, position: "after"}} as const;
+  const join = {command: "sequence.applyVideoTransition", params: {clip: 23, effect: "push", edge: "in", direction: "left"}} as const;
+  await adapter.preview({...proposal(), steps: [move, join]});
+  assert.deepEqual(calls.find(call => call.command === "proposal.preview")?.params.steps, [move, join]);
+  const before = calls.length;
+  const steps = (step: unknown) => ({...proposal(), steps: [step]}) as unknown as EditProposal;
+  for (const params of [
+    {clip: 23, effect: "cross_dissolve", edge: "in"}, {clip: 23, effect: "split", edge: "middle"}, {clip: 0, effect: "split", edge: "in"},
+    {clip: 23, effect: "split", edge: "in", direction: "left"}, {clip: 23, effect: "push", edge: "in", direction: "up"},
+    {clip: 23, effect: "split", edge: "in", frames: 30}, {effect: "split", edge: "in"},
+  ]) await assert.rejects(adapter.preview(steps({command: "sequence.applyVideoTransition", params})), code("invalid"));
+  assert.equal(calls.length, before);
+});
+
 test("alignRange widens word-boundary ticks to the engine's exact frame grid", () => {
   const f24 = 10584000000, fps24 = {num: 24, den: 1};
   // 0.9 s = 21.6 frames: In floors to 21, Out ceils to 22.
