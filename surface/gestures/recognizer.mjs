@@ -54,9 +54,9 @@ export const DEFAULTS = {
   quietAfterReleaseMs: 400, // no swipes right after an engagement ends
   mirrored: false, // true when landmarks come from a mirrored (selfie) image
   aspect: 4 / 3, // image width / height, so on-screen distances aren't stretched
-  tapOn: 0.35, // thumb–middle tip distance / palm length (nearer of 3D and on-screen): closed below, open above tapOff
+  tapOn: 0.35, // thumb–index tip distance / palm length (nearer of 3D and on-screen): closed below, open above tapOff
   tapOff: 0.5,
-  tapIndexRatio: 1.2, // thumb at least this many times nearer the middle tip than the index tip
+  tapMiddleRatio: 1.2, // thumb at least this many times nearer the index tip than the middle tip
   tapMaxMs: 350, // a tap closes and opens within this
   doubleTapGapMs: 400, // second tap must start within this of the first ending
   chopMinPalms: 0.7, // downward fingertip travel, in on-screen palm lengths, within swipeWindowMs
@@ -154,11 +154,11 @@ export function createRecognizer(config = {}) {
   let detent = 0;
   let cooldownUntil = -Infinity;
   /** @type {{t: number, x: number, y: number, tipX: number, tipY: number, palm: number, blade: boolean}[]} */ let track = [];
-  let tapping = false; // thumb–middle closed
+  let tapping = false; // thumb–index closed
   let tapStart = -Infinity;
   let lastTap = -Infinity; // end of a single tap awaiting its pair
   let blade = false; // hand currently chop-ready, for feedback
-  let middleRatio = Infinity; // thumb–middle closeness, for feedback
+  let tapRatio = Infinity; // thumb–index closeness, for feedback
   let chopTravel = 0; // fingertip drop so far in the window, palm lengths, for feedback
   let confidence = 0;
   let hornsRatio = Infinity; // last 🤘 thumb ratio, for feedback
@@ -215,18 +215,18 @@ export function createRecognizer(config = {}) {
       // Turned hands hide the fingertips and their depth estimate gets noisy; when the tips touch,
       // their on-screen distance stays small, so take the nearer of the two.
       const imgPalm = Math.max(1e-9, imageDist(h.image, WRIST, MIDDLE_MCP, c.aspect));
-      const close = Math.min(middle, imageDist(h.image, THUMB_TIP, MIDDLE_TIP, c.aspect) / imgPalm);
-      const indexClose = Math.min(pinch, imageDist(h.image, THUMB_TIP, INDEX_TIP, c.aspect) / imgPalm);
-      middleRatio = close;
+      const close = Math.min(pinch, imageDist(h.image, THUMB_TIP, INDEX_TIP, c.aspect) / imgPalm);
+      const middleClose = Math.min(middle, imageDist(h.image, THUMB_TIP, MIDDLE_TIP, c.aspect) / imgPalm);
+      tapRatio = close;
       const wasTapping = tapping;
-      // A tap starts only with the index out (pointing or open hand): a fist has the thumb on the middle finger too.
-      tapping = tapping ? close < c.tapOff : close < c.tapOn && indexClose > close * c.tapIndexRatio && ix;
+      // Thumb–index tap. Not from a fist: curled fingertips bunch up around the thumb.
+      tapping = tapping ? close < c.tapOff : close < c.tapOn && middleClose > close * c.tapMiddleRatio && pose !== "fist";
       if (tapping && !wasTapping) tapStart = t;
       if (!tapping && wasTapping) tapEnded = true;
     } else {
       horns = false;
       tapping = false;
-      middleRatio = Infinity;
+      tapRatio = Infinity;
       hornsRatio = Infinity;
       pose = null;
     }
@@ -351,15 +351,14 @@ export function createRecognizer(config = {}) {
       out.push({ type: "cancel", t });
     }
     const w = h.image;
-    // Pointer and pen. A short thumb–middle closure is a tap in progress and lifts the pen; a thumb
-    // resting on the middle finger while pointing (a long closure) doesn't block drawing.
-    const inTap = tapping && t - tapStart <= c.tapMaxMs;
-    if (pose === "point") {
+    // Pointer and pen. While the thumb is on the index tip (a tap, or a held pinch) the pointer freezes
+    // and the pen lifts, so the tap doesn't smear the end of the stroke.
+    if (tapping) { /* frozen */ } else if (pose === "point") {
       const p = toBox(w[INDEX_TIP].x, w[INDEX_TIP].y, c);
       const k = c.pointerSmoothing;
       pointer = pointer ? { x: pointer.x + k * (p.x - pointer.x), y: pointer.y + k * (p.y - pointer.y) } : p;
     } else pointer = null;
-    const pen = drawing && pose === "point" && !inTap && t >= penBlockedUntil;
+    const pen = drawing && pose === "point" && !tapping && t >= penBlockedUntil;
     if (pen && !penDown) out.push({ type: "pen-down", t });
     if (!pen) lift();
     penDown = pen;
@@ -422,7 +421,7 @@ export function createRecognizer(config = {}) {
   }
 
   /** UI snapshot: mode, effect and confidence must stay visible. */
-  const view = () => ({ state, rate, fine, angleDeg: angle, handedness, confidence, horns, hornsRatio, tapping, blade, middleRatio, chopTravel,
+  const view = () => ({ state, rate, fine, angleDeg: angle, handedness, confidence, horns, hornsRatio, tapping, blade, tapRatio, chopTravel,
     pose, drawing, penDown, pointer: pointer && { x: round(pointer.x), y: round(pointer.y) } });
 
   return { step, view };

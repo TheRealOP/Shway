@@ -22,13 +22,12 @@ const rand = () => ((seed = (seed * 16807) % 2147483647) / 2147483647 - 0.5);
 const POSES = {
   fist: { curl: [8, 12, 16, 20], thumb: [-0.025, 0.075] }, // fingers curled onto the thumb
   point: { curl: [12, 16, 20], thumb: [-0.07, 0.06] }, // index out, thumb tucked away from the middle tip
-  pointTap: { curl: [12, 16, 20], thumb: [-0.015, 0.07] }, // pointing, thumb on the curled middle tip
   horns: { curl: [12, 16], thumb: [-0.014, 0.072] }, // 🤘: thumb holding the middle and ring tips
 };
 const curled = ([px]) => [px * 0.5 - 0.02, 0.07];
 
 /** One hand pose: twist (deg about the forearm), image position, pinch or pose, jitter. */
-// pose: "horns" = thumb to index tip; "middle" = thumb to middle tip (open hand). pose: a POSES key.
+// pinch: true = thumb to index tip; "middle" = thumb to middle tip (open hand). pose: a POSES key.
 // bend: wrist flick, degrees the fingers swing in the image plane. thumbZ: depth-estimate error on the thumb tip.
 function hand({ twist = 0, x = 0.5, y = 0.5, pinch = false, pose = null, left = false, score = 0.95, jitter = 0.0015, bend = 0, thumbZ = 0 } = {}) {
   const b = (bend * Math.PI) / 180;
@@ -241,19 +240,25 @@ test("cancel stops and latches until released", () => {
   assert.equal(evs.length, i + 1);
 });
 
-// Thumb–middle taps: `pattern` is [closed?, ms] segments.
-const taps = (pattern, extra = {}) => {
+// Thumb–index taps: `pattern` is [closed?, ms] segments.
+const taps = (pattern, extra = {}, pinch = true) => {
   const out = [];
   let t = 0;
   for (const [closed, ms] of pattern) {
-    for (const end = t + ms; t < end; t += 33) out.push({ t, hand: hand({ pinch: closed ? "middle" : false, ...extra }) });
+    for (const end = t + ms; t < end; t += 33) out.push({ t, hand: hand({ pinch: closed ? pinch : false, ...extra }) });
   }
   return out;
 };
 
-test("thumb–middle double tap fires one draw-toggle", () => {
+test("thumb–index double tap fires one draw-toggle", () => {
   const evs = replay(taps([[0, 300], [1, 100], [0, 130], [1, 100], [0, 300]]));
-  assert.deepEqual(evs.map((e) => [e.type, e.drawing]), [["draw-toggle", true]]); // was "double-tap" (play/pause) before Part 2
+  assert.deepEqual(evs.map((e) => [e.type, e.drawing]), [["draw-toggle", true]]); // was a thumb–middle "double-tap" (play/pause) before Part 2
+});
+
+test("a thumb–middle double tap or a held pinch toggles nothing", () => {
+  assert.deepEqual(replay(taps([[0, 300], [1, 100], [0, 130], [1, 100], [0, 300]], {}, "middle")), [], "thumb–middle");
+  assert.deepEqual(replay(taps([[0, 300], [1, 2000], [0, 300]])), [], "held pinch, open hand");
+  assert.deepEqual(notPointer(replay(seq([[POINT, 300], [TAP, 1000], [POINT, 300]]))), [], "held pinch while pointing");
 });
 
 test("single, slow, or held taps are not a double tap", () => {
@@ -280,7 +285,7 @@ test("a wrist flick (palm still, fingers swing down) cuts", () => {
   assert.deepEqual(types(replay([...still, ...blurred])), ["chop"]);
 });
 
-test("a sideways thumb–middle double tap with noisy fingertip depth still fires", () => {
+test("a sideways thumb–index double tap with noisy fingertip depth still fires", () => {
   const evs = replay(taps([[0, 300], [1, 100], [0, 130], [1, 100], [0, 300]], { twist: 60, thumbZ: 0.03 }));
   assert.deepEqual(evs.map((e) => [e.type, e.drawing]), [["draw-toggle", true]]); // was "double-tap" (play/pause) before Part 2
 });
@@ -348,7 +353,7 @@ const seq = (segments) => {
   return out;
 };
 const notPointer = (evs) => evs.filter((e) => e.type !== "pointer");
-const POINT = { pose: "point" }, TAP = { pose: "pointTap" }, FIST = { pose: "fist" };
+const POINT = { pose: "point" }, TAP = { pose: "point", pinch: true }, FIST = { pose: "fist" };
 const drawOn = [[POINT, 300], [TAP, 100], [POINT, 130], [TAP, 100]];
 
 test("point: the index tip drives a smoothed, mirrored 0–1 pointer, emitted on change only", () => {
@@ -384,12 +389,15 @@ test("draw-toggle and pen: point = pen down, other poses = pen up; the ending ta
   assert.equal(at("pen-up", 1), seq([...drawOn, [POINT, 300], [{}, 200], [POINT, 300]]).at(-1).t + 33);
 });
 
-test("a single tap while drawing lifts the pen briefly; a resting thumb on the middle finger doesn't block drawing", () => {
-  const evs = notPointer(replay(seq([...drawOn, [POINT, 300], [TAP, 100], [POINT, 600], [TAP, 1000]])));
+test("while drawing: a single tap lifts the pen briefly; a held pinch freezes the pointer and keeps the pen up", () => {
+  const all = replay(seq([...drawOn, [POINT, 300], [TAP, 100], [POINT, 600],
+    [(p) => ({ ...TAP, x: 0.5 - 0.2 * p }), 1000], [{ pose: "point", x: 0.3 }, 300]]));
+  const evs = notPointer(all);
   assert.deepEqual(types(evs), ["draw-toggle", "pen-down", "pen-up", "pen-down", "pen-up", "pen-down"]);
   const [, , up, down, up2, down2] = evs;
   assert.ok(down.t - up.t >= 400 && down.t - up.t < 600, "pen back down once no second tap came");
-  assert.ok(down2.t - up2.t > 350 && down2.t - up2.t < 400, "a held thumb (not a tap) lets the pen down again");
+  assert.ok(!all.some((e) => e.type === "pointer" && e.t > up2.t && e.t < down2.t), "pointer frozen while the thumb is on the index");
+  assert.ok(down2.t - up2.t >= 990 && down2.t - up2.t < 1050, "a held pinch isn't a tap: the pen comes back as soon as it opens");
 });
 
 test("fist held → pause; opening the hand → release; slid fist → absolute slide offsets", () => {

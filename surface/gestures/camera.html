@@ -46,7 +46,7 @@
       <dt>rate</dt><dd id="rate">0</dd>
       <dt>hand</dt><dd id="hand">–</dd>
       <dt>🤘 thumb</dt><dd id="pinch">–</dd>
-      <dt>thumb–middle</dt><dd id="middle">–</dd>
+      <dt>thumb–index tap</dt><dd id="middle">–</dd>
       <dt>chop travel</dt><dd id="chop">–</dd>
       <dt>feedback p95</dt><dd id="lat">–</dd>
       <dt>recording</dt><dd id="rec">off (R)</dd>
@@ -120,7 +120,7 @@ async function main() {
     $("rate").textContent = `${v.rate}×`;
     const fmt = (x) => (Number.isFinite(x) ? x.toFixed(2) : "–");
     $("pinch").textContent = `${fmt(v.hornsRatio)} (🤘 < ${C.hornsOn}) · ${v.pose ?? "–"}${v.drawing ? " · drawing" : ""}`;
-    $("middle").textContent = `${fmt(v.middleRatio)} (tap < ${C.tapOn})${v.tapping ? " · closed" : ""}`;
+    $("middle").textContent = `${fmt(v.tapRatio)} (tap < ${C.tapOn})${v.tapping ? " · closed" : ""}`;
     $("chop").textContent = `${fmt(v.chopTravel)} / ${C.chopMinPalms} palms${v.blade ? " · blade" : ""}`;
     $("hand").textContent = hand ? `${v.handedness} ${(v.confidence * 100).toFixed(0)}%${v.horns ? " · 🤘" : ""}` : "none";
     requestAnimationFrame(() => {
