@@ -152,7 +152,8 @@ See [§0](#0-never-crash). It outranks every other engineering rule.
 ### 3.2 The rest
 
 See `CLAUDE.md`: pure Rust, dependency layering (`cargo xtask layers`), exact `Tick` time, everything is
-a command, everything is agent-drivable, and the quality gates (`cargo xtask ci`) before every commit.
+a command, everything is agent-drivable, and the targeted quality gates before every commit (the full
+`cargo xtask ci` runs in the background and never blocks a push; fix what it finds in a follow-up).
 
 
 Shared real-file test corpora (Photoshop-authored PSDs, etc.) live in
