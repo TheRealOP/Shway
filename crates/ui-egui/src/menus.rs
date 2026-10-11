@@ -96,6 +96,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     // F is the Program monitor's shortcut (see `external_commands`): elsewhere F stays Match Frame.
     uic!("view.videoFullscreen", "Full-Screen Video", ["View"], None),
     uic!("view.focusMode", "Focus Mode", ["View"], Some("Cmd+Shift+\\")),
+    uic!("view.assistant", "Assistant Chat", ["View"], Some("Cmd+J")),
     uic!("view.windowFullscreen", "Full Screen", ["View"], Some("Cmd+Ctrl+F")),
     uic!("view.theme.shway", "Shway", ["View", "Appearance"], None),
     uic!("view.theme.dark", "Classic", ["View", "Appearance"], None),
@@ -245,6 +246,11 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut params:
                 app.ui.focused = PanelKind::Program;
             }
             return Ok(json!({"videoFullscreen": app.ui.video_fullscreen}));
+        }
+        // the Shway chat: hide it (the video takes its room) or bring it back
+        "view.assistant" => {
+            let shown = app.toggle_panel(PanelKind::Assistant);
+            return Ok(json!({"assistant": shown}));
         }
         "view.focusMode" => {
             app.ui.focus_mode = !app.ui.focus_mode;
@@ -603,6 +609,7 @@ pub fn menu_items(app: &FilmcraftApp) -> Vec<MenuItem> {
         match it.id.as_str() {
             "view.videoFullscreen" => it.checked = Some(app.ui.video_fullscreen),
             "view.focusMode" => it.checked = Some(app.ui.focus_mode),
+            "view.assistant" => it.checked = Some(panel_shown(app, PanelKind::Assistant)),
             id => {
                 if let Some(p) = id.strip_prefix("view.panel.").and_then(PanelKind::from_name) {
                     it.checked = Some(panel_shown(app, p));
