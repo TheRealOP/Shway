@@ -466,7 +466,7 @@ test("sketch: an unknown figure (stray marks) doesn't block the message: it's ha
   s.proxy.answers.push(seen("unknown", "two isolated dots"), { action: "answer", reply: "Sure, which clip?" });
   const r = await s.call("/chat", { message: "add more padding to the intro" });
   assert.equal(r.body.reply, "Sure, which clip?");
-  assert.doesNotMatch(s.proxy.prompts[1].system, /transition:/, "no transition offered for an unknown figure");
+  assert.doesNotMatch(s.proxy.prompts[1].system, /transition \(sketch\)/, "an unknown figure picks no effect");
   assert.equal(s.editor.previews.length, 0);
   assert.deepEqual(s.sketch.cur, SKETCH, "the marks stay until undone or a decision");
   // A figure outside the enum is not trusted either.
@@ -474,15 +474,19 @@ test("sketch: an unknown figure (stray marks) doesn't block the message: it's ha
   assert.match((await s.call("/chat", { message: "do this" })).body.reply, /no known figure/);
 });
 
-test("sketch: only a finished sketch is read; without one a transition action is invalid", async (t) => {
+test("typed transition: no sketch needed; the creator names the effect; an unknown effect is retried", async (t) => {
   const s = await setup(); t.after(s.close);
-  s.draw({ ...SKETCH, drawing: true }); // still pinching
-  s.proxy.answers.push({ action: "transition", reply: "x", from: 10, to: 12 }, { action: "answer", reply: "Draw it first." });
-  const r = await s.call("/chat", { message: "split here" });
-  assert.equal(r.body.reply, "Draw it first.");
-  assert.equal(s.editor.shots.length, 0);
-  assert.match(s.proxy.prompts[1].prompt, /transition needs a finished sketch/);
-  assert.doesNotMatch(s.proxy.prompts[0].system, /transition:/);
+  s.draw({ ...SKETCH, drawing: true }); // still pinching: not a finished sketch, so it isn't read
+  s.proxy.answers.push({ action: "transition", reply: "x", from: 10, to: 12, effect: "wipe" },
+    { action: "transition", reply: "Iris into the next shot.", from: 10, to: 12, effect: "iris" });
+  const r = await s.call("/chat", { message: "add an iris transition into the next clip" });
+  assert.match(r.body.reply, /^Iris into the next shot\. Preview ready/);
+  assert.equal(s.editor.shots.length, 0, "no sketch, no screenshot");
+  assert.match(s.proxy.prompts[0].system, /transition\.effect "split", "push_left"/);
+  assert.match(s.proxy.prompts[1].prompt, /transition\.effect must be one of split, push_left, push_right, iris/);
+  assert.deepEqual(s.editor.previews[0].steps, [{ command: "sequence.applyVideoTransition", params: { clip: 10, effect: "iris_round", edge: "out" } }]);
+  await s.call("/chat/accept", {});
+  assert.deepEqual(s.sketch.cur, { ...SKETCH, drawing: true }, "a typed transition leaves the ink alone");
 });
 
 test("sketch: oversized Program picture is refused before the vision call", async (t) => {
