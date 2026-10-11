@@ -147,3 +147,17 @@ test("ink: pinch strokes from pointer events; undo drops the last stroke; 🤘 s
   ev("cancel");
   assert.deepEqual(ink.state(), { pointer: [0.24, 599 / 600], strokes: [], drawing: false, scrub: false });
 });
+
+test("deciding a proposal consumes only submitted native strokes; a later wave can undo the edit", () => {
+  const ink = createInk();
+  for (const x of [0.2, 0.6]) {
+    ink.event({type: "pointer", x, y: 0.4}); ink.event({type: "pen-down"});
+    ink.event({type: "pointer", x: x + 0.01, y: 0.41});
+    ink.event({type: "pointer", x: x + 0.02, y: 0.42}); ink.event({type: "pen-up"});
+  }
+  const [old, newer] = structuredClone(ink.state().strokes);
+  assert.equal(ink.consume([old]), true);
+  assert.deepEqual(ink.state().strokes, [newer]);
+  assert.equal(ink.undo(), true);
+  assert.equal(ink.undo(), false);
+});

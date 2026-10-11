@@ -1,7 +1,7 @@
 // Local Gemini proxy for the Shway surface: the browser calls this on localhost, so the API key
 // never reaches a web page. Node ≥ 22, no packages.
 //   node shway/gemini-server.mjs [--port 8790]
-// POST /generate takes {prompt, system?, schema?, model?, images?: [{mimeType: image/png|image/jpeg, data}]} (one image).
+// POST /generate takes {prompt, system?, schema?, model?, images?: [{mimeType: image/png|image/jpeg, data}]} (up to 8 images, 6 MB combined).
 // Reads GEMINI_API_KEY (and optional GEMINI_MODEL, JEV_KEY) from the main checkout's .env, shared by
 // every worktree, or from the file named by SHWAY_ENV. With JEV_KEY, POST /decide forwards TypeSafe Jev
 // questions (https://api.typesafe.ai/redoc, POST /v1/systemone) with the key kept here.
@@ -71,12 +71,13 @@ export function buildRequest(body, defaultModel = DEFAULT_MODEL) {
   if (system !== undefined && (typeof system !== "string" || system.length > MAX_PROMPT)) throw new HttpError(400, "system must be a string");
   if (schema !== undefined && (!schema || typeof schema !== "object" || Array.isArray(schema))) throw new HttpError(400, "schema must be a JSON schema object");
   if (typeof model !== "string" || !/^gemini-[a-z0-9.-]{1,60}$/.test(model)) throw new HttpError(400, "model must be a gemini-* id");
-  if (!Array.isArray(images) || images.length > 1) throw new HttpError(400, "images must be an array of at most 1 image");
+  if (!Array.isArray(images) || images.length > 8) throw new HttpError(400, "images must be an array of at most 8 images");
+  let imageBytes = 0;
   for (const i of images) {
     if (!i || typeof i !== "object" || Object.keys(i).some((k) => !["mimeType", "data"].includes(k))) throw new HttpError(400, "an image is {mimeType, data}");
     if (!IMAGE_TYPES.includes(i.mimeType)) throw new HttpError(400, `image mimeType must be one of ${IMAGE_TYPES.join(", ")}`);
     if (typeof i.data !== "string" || !i.data || !/^[A-Za-z0-9+/]+={0,2}$/.test(i.data)) throw new HttpError(400, "image data must be non-empty base64");
-    if (Math.floor((i.data.length * 3) / 4) > MAX_IMAGE_BYTES) throw new HttpError(413, "image too large");
+    if ((imageBytes += Math.floor((i.data.length * 3) / 4)) > MAX_IMAGE_BYTES) throw new HttpError(413, "image too large");
   }
   return {
     model,

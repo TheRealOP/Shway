@@ -110,6 +110,13 @@ export function createInk() {
     /** The dot shows only while pointing: pass recognizer.view().pointer !== null each frame. */
     visible(/** @type {boolean} */ on) { if (on || !pointer) return false; pointer = null; return true; },
     clear,
+    /** Remove exactly the strokes used by a decided proposal, preserving newer drawing. */
+    consume(used) {
+      const keys = new Set(used.map(s => JSON.stringify(s)));
+      const before = strokes.length;
+      strokes = strokes.filter(s => !keys.has(JSON.stringify(s)));
+      return strokes.length !== before;
+    },
     /** The undo wave: drops the last stroke; false when there is none (then undo the last edit). */
     undo: () => strokes.pop() !== undefined,
     // Strokes under MIN_STROKE points are pinch flicker (a pinch that opened and closed in a frame or two), not ink.

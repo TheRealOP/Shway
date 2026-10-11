@@ -9,6 +9,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{EngineError, Result, Session};
+mod tools;
+pub(crate) use tools::catalog as tool_catalog;
 
 const MAX_STEPS: usize = 16;
 const MAX_TARGETS: usize = 32;
@@ -50,6 +52,19 @@ enum Step {
     Move(Move),
     #[serde(rename = "sequence.applyVideoTransition")]
     Transition(Transition),
+    #[serde(rename = "clip.zoomRegion")]
+    Zoom(Zoom),
+    #[serde(rename = "editor.command")]
+    Tool(tools::Tool),
+}
+
+/// Relative static output-frame zoom, composed with existing Motion.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Zoom {
+    clip: u64,
+    region: [f64; 4],
+    factor: f64,
 }
 
 /// A two-sided video transition at one edge of an explicit clip, from a short allowlist.
@@ -422,7 +437,52 @@ fn apply(s: &mut Session, step: Step) -> Result<Value> {
         }
         Step::Move(p) => rearrange(s, &p),
         Step::Transition(p) => transition(s, &p),
+        Step::Zoom(p) => zoom(s, &p),
+        Step::Tool(p) => tools::apply_tool(s, p),
     }
+}
+
+fn zoom(s: &mut Session, p: &Zoom) -> Result<Value> {
+    let [left, top, right, bottom] = p.region;
+    if !p.region.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v))
+        || right - left < 0.02
+        || bottom - top < 0.02
+        || !p.factor.is_finite()
+        || p.factor <= 1.0
+        || p.factor > 4.0
+    {
+        return Err(bad("zoom needs a normalized region >= 0.02 wide/high and factor >1, <=4"));
+    }
+    targets(s, &[p.clip])?;
+    let q = s.active_sequence().ok_or(EngineError::NoSequence)?;
+    let (track, clip) = q.find_item(ClipId(p.clip)).ok_or_else(|| bad("missing zoom clip"))?;
+    if !q.video_tracks.iter().any(|t| t.id == track) || q.settings.width == 0 || q.settings.height == 0 {
+        return Err(bad("zoom needs a video clip and positive frame dimensions"));
+    }
+    let motion = clip.effect("motion").ok_or_else(|| bad("zoom needs existing Motion controls"))?;
+    if !motion.enabled || motion.params.values().any(|v| v.is_animated()) {
+        return Err(bad("zoom does not replace disabled or animated Motion; use detailed controls"));
+    }
+    let time = clip.source_in;
+    let w = f64::from(q.settings.width);
+    let h = f64::from(q.settings.height);
+    let pos = motion.vec2_at("position", time);
+    let pos = [if pos.x.is_nan() { w / 2.0 } else { pos.x }, if pos.y.is_nan() { h / 2.0 } else { pos.y }];
+    let position = [w / 2.0 + p.factor * (pos[0] - (left + right) * w / 2.0), h / 2.0 + p.factor * (pos[1] - (top + bottom) * h / 2.0)];
+    let scale = motion.f64_at("scale", time) * p.factor;
+    let uniform = motion.param("uniform_scale").and_then(|v| v.value.as_bool()).unwrap_or(true);
+    let width = if uniform { scale } else { motion.f64_at("scale_width", time) * p.factor };
+    if !position.iter().all(|v| v.is_finite() && v.abs() <= 1_000_000.0) || ![scale, width].iter().all(|v| v.is_finite() && *v > 0.0 && *v <= 4000.0) {
+        return Err(bad("composed zoom exceeds supported Motion bounds"));
+    }
+    // Preserve anchor, rotation, scale-to-frame and nonuniform proportions; only zoom video.
+    for (param, value) in [("position", json!(position)), ("scale", json!(scale)), ("scale_width", json!(width))] {
+        if param == "scale_width" && uniform {
+            continue;
+        }
+        s.execute("effects.setParam", json!({"clip":p.clip,"effect":"motion","param":param,"value":value}))?;
+    }
+    Ok(json!({"clip":p.clip,"position":position,"scale":scale,"scaleWidth":width}))
 }
 
 fn transition(s: &mut Session, p: &Transition) -> Result<Value> {

@@ -80,7 +80,8 @@ See [acceptance](../docs/wiki/acceptance.md) for the dated status line.
 
 ## Desktop editor: camera gestures (DEV-91)
 
-The browser review page (`review.html`) is gone: for the desktop editor the webcam runs natively,
+The camera/microphone review controller is retired. `review.html` is an optional timed transition
+viewer only. For the desktop editor the webcam runs natively,
 started by `node shway/assistant.mjs --port 8793 --editor 127.0.0.1:9876 --proxy http://127.0.0.1:8790 --camera` (see [gestures](gestures/README.md)).
 Its push-to-talk voice went with it; voice is unavailable on the desktop path until it moves into
 the native path too (Track D). Chat in the editor's chat panel still works. The assistant's

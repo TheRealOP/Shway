@@ -27,7 +27,8 @@ The supported proposal steps are `timeline.trim`, `clip.replaceFromBin`, `timeli
 `timeline.remove` (`{clips}`: ripple delete with linked partners), `timeline.move`
 (`{clip, anchor, position: "before"|"after"}`: rearrange on one track; counts as two references) and
 `sequence.applyVideoTransition` (`{clip, effect: "split"|"push"|"iris_round", edge: "in"|"out",
-direction?: "left"|"right"}` for push: a two-sided transition at that cut; sketch → edit). Proposals explicitly name
+direction?: "left"|"right"}` for push: a two-sided transition at that cut), `clip.zoomRegion`
+and `editor.command {id, clips, args}` from the runtime `proposal.tools` catalog. Proposals explicitly name
 expected revision, active sequence, target clips, source IDs, and frame deltas. Requests are limited
 to 16 steps, 32 total explicit target references, and labels of at most 120 UTF-8 bytes. Rust stages them in a
 disposable session. `previewFrame` returns bounded RGBA pixels from that candidate without changing
@@ -54,8 +55,9 @@ The adapter also exposes `select`, `seekFrame`, `play`, `stop`, `undo`, H.264/AA
 There is no public arbitrary model-command passthrough. Playback and export operate on the accepted
 project; staged candidates are inspected/rendered through their token.
 
-Current limitations: finite media sources, synchronized linked A/V, normal speed, no reverse, frame
-hold, multicamera, nested sequence or subclip targets. Proposals whose exact trim exceeds handles or
+Current trim/replacement limitations: finite media sources, synchronized linked A/V, normal speed,
+no reverse, frame hold, multicamera, nested sequence or subclip targets. Ordinary command previews
+can change speed/reverse and hold through their separately validated tools. Proposals whose exact trim exceeds handles or
 whose replacement is shorter than the retained clip are rejected for replanning. A candidate frame
 API is available; no full gesture/voice interface or real-time candidate playback is claimed.
 
@@ -147,8 +149,8 @@ node shway/gemini-server.mjs --port 8790      # reads GEMINI_API_KEY (optional G
   so every worktree uses one file. `SHWAY_ENV=/path/.env` overrides it. `.env` is excluded from git.
 - **`POST /generate`:** body `{prompt, system?, schema?, model?, images?}`. It returns `{model, usage, text}`,
   or `{model, usage, json}` when you pass a `schema`. A `schema` is a Gemini `responseSchema`
-  (OpenAPI subset: `OBJECT`, `STRING`, …). `images` is at most one `{mimeType: "image/png"|"image/jpeg",
-  data: base64}` of at most 6 MB (a Program monitor screenshot), sent inline before the prompt; bodies
+  (OpenAPI subset: `OBJECT`, `STRING`, …). `images` contains up to eight `{mimeType: "image/png"|"image/jpeg",
+  data: base64}` images, at most 6 MB combined, sent inline in order before the prompt; bodies
   may be up to 9 MB on this route.
 - **`POST /transcribe`:** body `{mimeType, data}`. `mimeType` is `audio/webm`, `audio/ogg`,
   `audio/mp4` or `audio/wav`; a codec parameter such as `;codecs=opus` is allowed. `data` is base64.
@@ -349,12 +351,16 @@ restart the assistant to retry. Voice from the old browser page is unavailable u
 3. Gemini (`POST {proxy}/generate` with a response schema) picks one action from the allowlist. Each
    action has its own nested object, and every field in it is required: `answer`, `remove{clips}`,
    `trim{clip, edge, direction, amount, unit}`, `move{clip, target, position}`,
-   `replace_take{correction}` and, only while a finished sketch is shown, `transition{from, to}`.
+   `replace_take{correction}`, `edit{steps}` (approved commands with explicit clips and `argsJson`),
+   `navigate{operation,value}`, `transition{from, to, effect, direction}` and, only while a finished
+   sketch is shown, `zoom{clip, region, factor}`.
 4. Validation rejects any other field, unknown clip ids, amounts that are not positive, trims past
    the clip length or the media handles, and moves onto the same clip, its linked partner or another
    track. An invalid answer gets one
    retry that quotes the error. If that also fails, the creator gets a polite "couldn't" reply.
-5. Code maps the checked fields to engine params. The model never names commands, files or raw params.
+5. Code maps the checked fields to engine params. Model command names must be in `proposal.tools`;
+   target-free arguments pass both envelope checks and authoritative Rust type/range checks.
+   Files, jobs and preferences are excluded.
 6. Edits go only through `proposal.preview` with `expectedRevision`. A trim is a ripple
    `timeline.trim` of `round(seconds × fps)` frames. A remove is a `timeline.remove {clips}` step
    (ripple delete; linked audio goes with its video). A move is a `timeline.move {clip, anchor:
@@ -365,21 +371,46 @@ restart the assistant to retry. Voice from the old browser page is unavailable u
    Gemini otherwise. Nothing commits until `/chat/accept`.
 7. A stale revision, at preview or at accept, cancels the preview and asks the creator to retry.
 
-**Sketch → edit (DEV-93).** The assistant remembers the latest ink it forwarded (`POST /ink`). If a
-chat message arrives while a finished sketch is shown (strokes, `drawing: false`), it first takes
-`ui.screenshot {panel:"program"}` (written to a temp file, read, deleted; > 6 MB is refused), then asks
-`gemini-3.1-pro-preview` to classify the drawing with the PNG and the strokes: `split_outward` →
-`split`, `arrow_left`/`arrow_right` → `push` that way, `circle` → `iris_round`, `unknown` → a reply
-describing it, nothing changes. Flash then picks `transition{from, to}`; the proposal is
-`timeline.move {clip: to, anchor: from, position: "after"}` when `to` doesn't already follow, then
-`sequence.applyVideoTransition {clip: from, effect, edge: "out"}`. Accept or Reject clears the ink
-(`ui.set {ink: null}`). Live drawing and the vision reading are not verified yet
-([interactions](../docs/wiki/interactions.md#sketch-vocabulary-2026-10-11-dev-93)).
+**Freehand + explanation.** With a finished sketch (`drawing: false`), a chat or review note sends
+the Program monitor screenshot, full ordered normalized strokes, project context and explanation
+together to `gemini-3.1-pro-preview`. There is no shape classification step. The model chooses one
+validated supported action or asks for clarification. An explicit transition chooses its effect
+(`split|push|iris_round`) and direction; code stages a move first if needed.
+A circled region plus “zoom 2x here” stages `clip.zoomRegion {clip, region, factor}`, composing
+the existing Motion controls for the whole current video clip. It is a static zoom/recenter,
+not animated camera movement. Animated/disabled Motion is refused. First nonempty ink pauses and
+captures the frame/project target; stale frames or changed ink during inference cannot stage.
+Screenshot files are deleted after reading and capped at 6 MB. Accept/Reject consumes the submitted
+ink; newer strokes remain. See the [interaction contract](../docs/wiki/interactions.md#freehand-drawing--explanation-2026-10-11)
+and [verification evidence](../docs/wiki/acceptance.md#freehand-intent-and-region-zoom-2026-10-11).
+
+**Ordinary tools.** `GET /chat/tools` exposes the runtime catalog: 62 generic commands, including
+effects/parameters/keyframes, speed/reverse, gain/volume, timeline adjustments/nudges, framing,
+graphics, captions and essential-sound tags. The whole batch stages atomically and commits as one
+undo entry. Coverage is 57 / 89 core project-editing registry entries, including shortcut aliases;
+the catalog also reports all 121 core entries and the 32 excluded IDs. There are 180 applicable
+video/audio effect definitions. Selection-dependent availability describes current editor state;
+explicit targets are validated again during staging. See the
+[coverage and limits](../docs/wiki/interactions.md#ordinary-tools-and-transition-inspection).
+
+**Native ink integration.** The camera worker forwards ink through the assistant’s `updateInk`
+callback, sharing the same bounded frame/revision capture as the optional `/ink` endpoint. Deciding
+a sketch consumes those strokes from native ink too, preserving newer strokes and allowing a later
+wave to undo the accepted edit. `review.html` is only an optional timed-image viewer; camera and
+gestures stay native.
+
+**Rendered transition review.** After staging a transition, `preview.mjs` renders five ordered
+128-pixel candidate frames around the cut and sends those images/timestamps to vision. A rejected,
+invalid or stale inspection cancels the candidate. Successful pending state includes the inspection
+summary; `GET /chat/preview` returns the same token's timed images for `surface/review.html`.
+The UI labels sampled still frames accurately; it does not claim continuous playback or audio
+inspection. The creator still accepts or rejects the proposal.
 
 **Not supported yet:**
 
-- **Moving several clips at once:** a move names one clip (with its links); "move the Chili's part"
-  where that part is two clips moves only the one the model picks.
+- **Rearranging a group as one move:** the adjacency move action names one clip (with its links).
+  Explicit multi-step batches and some fixed nudges are available; group-level rearrangement needs
+  a separate contract.
 - **Restarts:** a pending preview is not cancelled when the service restarts. The engine then
   refuses new previews until that token is cancelled or the app restarts.
 

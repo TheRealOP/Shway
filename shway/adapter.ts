@@ -38,7 +38,12 @@ export interface TransitionStep {
   command: "sequence.applyVideoTransition";
   params: {clip: number; effect: "split" | "push" | "iris_round"; edge: "in" | "out"; direction?: "left" | "right"};
 }
-export type ProposalStep = TrimStep | ReplaceStep | PlaceStep | RemoveStep | MoveStep | TransitionStep;
+export interface ZoomStep {
+  command: "clip.zoomRegion";
+  params: {clip: number; region: number[]; factor: number};
+}
+export interface CommandStep {command: "editor.command"; params: {id: string; clips: number[]; args: Record<string, unknown>}}
+export type ProposalStep = TrimStep | ReplaceStep | PlaceStep | RemoveStep | MoveStep | TransitionStep | ZoomStep | CommandStep;
 export interface EditProposal {
   expectedRevision: number;
   sequence: number;
@@ -200,6 +205,22 @@ function proposalInput(value: EditProposal): EditProposal {
       if (params.position !== "before" && params.position !== "after") invalid("move position must be before or after");
       targets += 2;
       return {command: step.command, params: {clip, anchor, position: params.position}};
+    }
+    if (step.command === "editor.command") {
+      keys(params, ["id", "clips", "args"], "editor command");
+      if (typeof params.id !== "string" || !/^[a-zA-Z][a-zA-Z0-9]*(?:\.[a-zA-Z][a-zA-Z0-9]*)+$/.test(params.id) || params.id.length > 100) invalid("invalid command id");
+      const clips = idList(params.clips, "clips"), args = object(params.args, "args");
+      if (Object.keys(args).length > 12 || JSON.stringify(args).length > 8192) invalid("editor args too large");
+      targets += clips.length;
+      return {command: step.command, params: {id: params.id, clips, args}};
+    }
+    if (step.command === "clip.zoomRegion") {
+      keys(params, ["clip", "region", "factor"], "zoom");
+      const clip = integer(params.clip, "clip", 1), region = params.region, factor = params.factor;
+      if (!Array.isArray(region) || region.length !== 4 || !region.every((v) => typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1) || region[2] - region[0] < 0.02 || region[3] - region[1] < 0.02) invalid("zoom region must be a normalized rectangle at least 0.02 wide/high");
+      if (typeof factor !== "number" || !Number.isFinite(factor) || factor <= 1 || factor > 4) invalid("zoom factor must be >1 and <=4");
+      targets++;
+      return {command: step.command, params: {clip, region: [...region], factor}};
     }
     if (step.command === "sequence.applyVideoTransition") {
       keys(params, ["clip", "effect", "edge", "direction"], "transition");

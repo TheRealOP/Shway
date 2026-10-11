@@ -1,0 +1,64 @@
+<!doctype html>
+<!-- Optional timed transition viewer; camera and gestures remain in the native editor. -->
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Shway Transition Review</title>
+<style>
+  :root { --bg: #fff; --fg: #111; --muted: #666; --line: #ddd; --accent: #0a7; --warn: #c50; --rec: #d22; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #111; --fg: #eee; --muted: #999; --line: #333; --accent: #3c9; --warn: #f80; --rec: #f55; } }
+  * { box-sizing: border-box; }
+  body { margin: 0 auto; max-width: 560px; padding: 12px 16px; background: var(--bg); color: var(--fg); font: 14px system-ui, sans-serif; display: flex; flex-direction: column; gap: 10px; }
+  h1 { font-size: 17px; margin: 0; }
+  section { border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+  button, input { font: inherit; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--muted); background: transparent; color: var(--fg); }
+  button { cursor: pointer; }
+  input { width: 100%; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .note { color: var(--muted); font-size: 12px; }
+  .err { color: var(--warn); font-size: 12px; }
+  .stage { position: relative; width: 100%; aspect-ratio: 4 / 3; background: #000; border-radius: 6px; overflow: hidden; }
+  video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); display: block; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  #ptt { touch-action: none; user-select: none; font-weight: 600; }
+  #ptt[data-rec="true"] { border-color: var(--rec); background: var(--rec); color: #fff; }
+  #status { font-size: 15px; font-weight: 600; min-height: 1.4em; }
+  #log { font: 12px ui-monospace, monospace; white-space: pre-wrap; max-height: 10em; overflow-y: auto; margin: 0; }
+</style>
+</head><body>
+<h1>Shway transition review</h1>
+<p>Inspect the staged samples here. Accept or reject in the editor chat panel.</p>
+<label for="asst">Assistant</label><input id="asst" value="http://127.0.0.1:8793">
+<p id="waiting" role="status">Waiting for an inspected transition preview.</p>
+<section id="transition-preview" hidden>
+<h2>Staged transition · timed frames</h2><p id="transition-inspection"></p>
+<img id="transition-frame" alt="Rendered staged transition frame" style="width:100%;image-rendering:auto">
+<p id="transition-time"></p><div id="transition-strip" style="display:flex;gap:8px;overflow:auto"></div><p id="transition-samples"></p>
+</section>
+<script type="module">
+const $ = id => document.getElementById(id);
+// Rendered proposal frames stay on the staged token; polling never edits or seeks the project.
+let shownPreview = null;
+async function showTransitionPreview() {
+  try {
+    const base = $("asst").value.replace(/\/$/, "");
+    const state = await fetch(base + "/chat/state").then(r => r.json());
+    if (!state.pending?.rendered) { $("transition-preview").hidden = true; $("waiting").hidden = false; shownPreview = null; return; }
+    if (shownPreview === state.pending.token) return;
+    const response = await fetch(base + "/chat/preview");
+    if (!response.ok) { $("transition-preview").hidden = true; $("waiting").hidden = false; return; }
+    const p = await response.json();
+    if (!Array.isArray(p.frames) || p.frames.length > 5 || p.token !== state.pending.token) return;
+    const frames = p.frames.filter(f => typeof f.image === "string" && f.image.startsWith("data:image/png;base64,") && Number.isFinite(f.timeSeconds));
+    if (!frames.length) return;
+    shownPreview = p.token;
+    const select = f => { $("transition-frame").src = f.image; $("transition-time").textContent = f.timeSeconds.toFixed(3) + " s · frame " + f.frame; };
+    $("transition-inspection").textContent = p.inspection ?? "";
+    $("transition-samples").textContent = `${frames.length} sampled frames, not continuous playback. Accept or reject in the editor chat panel.`;
+    $("transition-strip").replaceChildren(...frames.map(f => {
+      const b = document.createElement("button"); b.type = "button"; b.textContent = f.timeSeconds.toFixed(3) + " s"; b.onclick = () => select(f); return b;
+    }));
+    select(frames[Math.floor(frames.length / 2)]); $("transition-preview").hidden = false; $("waiting").hidden = true;
+  } catch { $("transition-preview").hidden = true; $("waiting").hidden = false; }
+}
+setInterval(showTransitionPreview, 1000);
+
+
+</script></body></html>
