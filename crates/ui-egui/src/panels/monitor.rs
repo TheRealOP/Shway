@@ -289,6 +289,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
     if which == Which::Program && show_picture {
         crate::panels::graphics::monitor_overlay(app, ui, pic, frame_size);
         crate::panels::masks::monitor_overlay(app, ui, pic, frame_size);
+        ink_overlay(ui.painter(), pic, &app.ui.ink);
     }
     if show_picture {
         monitor_view::guides(app, ui, which, video_area, pic, frame_size);
@@ -723,4 +724,25 @@ fn source_nav(app: &mut FilmcraftApp, cmd: &str) {
         _ => cur + rate.frame_duration(),
     };
     let _ = app.session.execute("source.setPlayhead", json!({"time": t.0}));
+}
+
+/// The Shway ink (`ui.set {ink}`) over the Program picture: strokes as yellow polylines with a dark
+/// outline (visible on any footage), the pointer as a dot, or a ring while `drawing`.
+fn ink_overlay(painter: &egui::Painter, pic: Rect, ink: &crate::state::Ink) {
+    const INK: Color32 = Color32::from_rgb(255, 221, 0);
+    let outline = Stroke::new(6.0, Color32::from_black_alpha(200));
+    let at = |[x, y]: [f32; 2]| pos2(pic.min.x + x * pic.width(), pic.min.y + y * pic.height());
+    for s in &ink.strokes {
+        let pts: Vec<_> = s.iter().copied().map(at).collect();
+        painter.add(egui::Shape::line(pts.clone(), outline));
+        painter.add(egui::Shape::line(pts, Stroke::new(3.0, INK)));
+    }
+    if let Some(p) = ink.pointer.map(at) {
+        if ink.drawing {
+            painter.circle_stroke(p, 10.0, outline);
+            painter.circle_stroke(p, 10.0, Stroke::new(3.0, INK));
+        } else {
+            painter.circle(p, 6.0, INK, Stroke::new(2.0, Color32::from_black_alpha(200)));
+        }
+    }
 }
