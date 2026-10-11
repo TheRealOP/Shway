@@ -106,6 +106,19 @@ each take one step. Speech-to-text runs through the local proxy's `POST /transcr
   - The demo page as a whole.
   - Replacement items that have source In marks.
 
+**Ink overlay status 2026-10-11 (DEV-91):** `ui.set {ink: {pointer, drawing, strokes}}` paints the
+pointer (a dot, or a ring while drawing) and the strokes over the Program monitor picture. Coordinates
+are 0–1 over the frame, not the panel. `ink: null` clears it. Schema and caps:
+[control protocol](../control-protocol.md) `ui.set`.
+
+- **Verified:** hostile payloads and the serde round-trip pass in `crates/ui-egui/tests/ink_ui.rs`.
+- **Verified:** in the live desktop app with a generated 1920×1080 fixture, a Fit view and horizontal
+  letterboxing, `ui.screenshot {panel: "program"}` captured the ring and strokes. Every vertex
+  landed at its 0–1 position on the picture, not on the panel. `ui.inspect` → `ui.ink` reported
+  the state. After `ink: null`, the state was empty and the next screenshot showed no ink.
+- **Not verified:** ink from a live camera through the assistant's `POST /ink`. Also untested:
+  zoomed or panned Program views and the Comparison display.
+
 ## Related pages
 
 [Wiki map](README.md) · [Architecture](architecture.md) · [Adaptation](adaptation.md) · [Acceptance](acceptance.md)
