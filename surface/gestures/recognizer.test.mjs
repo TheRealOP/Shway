@@ -174,20 +174,18 @@ test("switching into fine mode while twisted does not jump", () => {
   assert.equal(shuttles(evs).at(-1), 0);
 });
 
-test("a deliberate swipe fires once, then cooldown, then again", () => {
+test("a deliberate swipe fires after a short hold; a swipe and a quick swipe back is a wave, not two swipes", () => {
   const fast = (t0, from, to) => frames(t0, 200, (p) => ({ hand: hand({ x: from + (to - from) * p }) }));
-  const evs = replay([
-    ...frames(0, 300, () => ({ hand: hand({ x: 0.7 }) })),
-    ...fast(330, 0.7, 0.3), // image-left = user's right (unmirrored)
-    ...fast(560, 0.3, 0.7), // inside cooldown
-    ...frames(790, 600, () => ({ hand: hand({ x: 0.7 }) })),
-    ...fast(1420, 0.7, 0.3),
-  ]);
-  assert.deepEqual(evs.map((e) => e.type === "swipe" && e.direction), ["right", "right"]);
+  const still = (t0, ms, x) => frames(t0, ms, () => ({ hand: hand({ x }) }));
+  const one = replay([...still(0, 300, 0.7), ...fast(330, 0.7, 0.3), ...still(560, 400, 0.3)]);
+  assert.deepEqual(one.map((e) => e.type === "swipe" && e.direction), ["right"]); // image-left = user's right (unmirrored)
+  assert.ok(one[0].t >= 600, `held ~200 ms after the travel was enough (~420 ms), at ${one[0].t}`);
+  const back = replay([...still(0, 300, 0.7), ...fast(330, 0.7, 0.3), ...fast(560, 0.3, 0.7), ...still(790, 600, 0.7)]);
+  assert.deepEqual(back.filter((e) => e.type === "swipe"), [], "the reversal makes it a wave");
 });
 
 test("mirrored input flips swipe direction", () => {
-  const evs = replay(frames(0, 200, (p) => ({ hand: hand({ x: 0.7 - 0.4 * p }) })), { mirrored: true });
+  const evs = replay([...frames(0, 200, (p) => ({ hand: hand({ x: 0.7 - 0.4 * p }) })), ...frames(233, 300, () => ({ hand: hand({ x: 0.3 }) }))], { mirrored: true });
   assert.deepEqual(evs, [{ type: "swipe", t: evs[0]?.t, direction: "left" }]);
 });
 
@@ -299,7 +297,7 @@ test("palm-facing drops, curled hands, slow moves and upward moves don't cut", (
 });
 
 test("a sideways swipe in blade pose is a swipe, not a cut", () => {
-  const evs = replay(frames(0, 200, (p) => ({ hand: hand({ twist: 75, x: 0.7 - 0.4 * p }) })));
+  const evs = replay([...frames(0, 200, (p) => ({ hand: hand({ twist: 75, x: 0.7 - 0.4 * p }) })), ...frames(233, 300, () => ({ hand: hand({ twist: 75, x: 0.3 }) }))]);
   assert.deepEqual(types(evs), ["swipe"]);
 });
 
@@ -393,7 +391,7 @@ test("no swipe while pointing or in a fist", () => {
   const fist = types(replay(seq([[FIST, 300], [fast(FIST), 200], [FIST, 300]])));
   assert.ok(!fist.includes("swipe") && fist.includes("slide"), "fist slides, never swipes");
   assert.deepEqual(replay(seq([[fast(FIST), 120]])), [], "a fast fist that never settles does nothing");
-  assert.deepEqual(types(replay(seq([[{}, 300], [fast({}), 200]]))), ["swipe"], "an open hand still swipes");
+  assert.deepEqual(types(replay(seq([[{ x: 0.7 }, 300], [fast({}), 200], [{ x: 0.3 }, 300]]))), ["swipe"], "an open hand still swipes");
 });
 
 test("fist: tracking loss latches until the fist opens; Esc cancels", () => {
@@ -439,4 +437,13 @@ test("pinch draws: pen down while thumb and index touch, up when they part; poin
 test("no slide or scrub while pinched: a pinch with a twist doesn't engage", () => {
   const evs = types(replay(seq([[TAP, 300], [{ ...TAP, twist: 40 }, 300]])));
   assert.ok(!evs.includes("engage") && !evs.includes("slide"));
+});
+
+test("a big fast wave (each leg swipe-sized) undoes and never swipes, even while it keeps waving", () => {
+  const legs = [0.7, 0.4, 0.7, 0.4, 0.7, 0.4];
+  const evs = replay([...frames(0, 300, () => ({ hand: hand({ x: 0.7 }) })),
+    ...legs.slice(1).flatMap((to, i) => frames(330 + i * 200, 167, (p) => ({ hand: hand({ x: legs[i] + (to - legs[i]) * p }) }))),
+    ...frames(1400, 400, () => ({ hand: hand({ x: 0.4 }) }))]);
+  assert.ok(types(evs).includes("undo"));
+  assert.ok(!types(evs).includes("swipe"), JSON.stringify(types(evs)));
 });

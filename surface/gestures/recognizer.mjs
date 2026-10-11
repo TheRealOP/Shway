@@ -48,6 +48,7 @@ export const DEFAULTS = {
   swipeWindowMs: 250,
   swipeMaxOffAxis: 0.5, // max |dy| / |dx|
   swipeCooldownMs: 700,
+  swipeHoldMs: 200, // a swipe waits this long: if the hand reverses (a wave) it is dropped
   quietAfterReleaseMs: 400, // no swipes right after an engagement ends
   mirrored: false, // true when landmarks come from a mirrored (selfie) image
   aspect: 4 / 3, // image width / height, so on-screen distances aren't stretched
@@ -168,6 +169,8 @@ export function createRecognizer(config = {}) {
   let cooldownUntil = -Infinity;
   /** @type {{t: number, x: number, y: number, tipX: number, tipY: number, palm: number, blade: boolean}[]} */ let track = [];
   /** @type {{t: number, x: number}[]} */ let wave = []; // open-palm x, for the undo wave
+  let waveUntil = -Infinity; // swipes stand down until then: a wave reversed or undid recently
+  /** @type {{t: number, direction: "left" | "right"} | null} */ let pendingSwipe = null;
   let tapping = false; // thumb–index closed
   let blade = false; // hand currently chop-ready, for feedback
   let tapRatio = Infinity; // thumb–index closeness, for feedback
@@ -313,6 +316,10 @@ export function createRecognizer(config = {}) {
     }
 
     // Idle
+    if (pendingSwipe && t - pendingSwipe.t >= c.swipeHoldMs) { // no reversal came: it was a swipe
+      out.push({ type: "swipe", t, direction: pendingSwipe.direction });
+      pendingSwipe = null;
+    }
     const lift = () => { if (penDown) out.push({ type: "pen-up", t }); penDown = false; };
     if (h && engage) {
       const axis = axisOf(h.world);
@@ -376,9 +383,15 @@ export function createRecognizer(config = {}) {
     if (pose === "open") {
       wave.push({ t, x });
       wave = wave.filter((s) => s.t >= t - c.waveWindowMs);
-      if (t >= cooldownUntil && waveLegs(wave, c.waveMinLeg) >= c.waveLegs) {
+      const legs = waveLegs(wave, c.waveMinLeg);
+      if (legs >= 2) { // the hand reversed: a wave, not a swipe
+        pendingSwipe = null;
+        waveUntil = t + c.waveWindowMs;
+      }
+      if (t >= cooldownUntil && legs >= c.waveLegs) {
         out.push({ type: "undo", t });
         cooldownUntil = t + c.swipeCooldownMs;
+        waveUntil = t + c.waveWindowMs; // still waving after the undo: no swipes
         wave = [];
         track = [];
         return out;
@@ -406,12 +419,12 @@ export function createRecognizer(config = {}) {
         return out;
       }
     }
-    if (t >= cooldownUntil && first) {
+    if (t >= cooldownUntil && t >= waveUntil && first) {
       const dx = x - first.x, dy = y - first.y;
       if (Math.abs(dx) >= c.swipeMinDist && Math.abs(dy) <= c.swipeMaxOffAxis * Math.abs(dx)) {
         // Camera faces the user: in an unmirrored image the user's right is image left.
         const right = c.mirrored ? dx > 0 : dx < 0;
-        out.push({ type: "swipe", t, direction: right ? "right" : "left" });
+        pendingSwipe = { t, direction: right ? "right" : "left" };
         cooldownUntil = t + c.swipeCooldownMs;
         track = [];
       }
