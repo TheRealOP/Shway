@@ -220,7 +220,7 @@ test("assembly sends one exact timeline.place step and rejects hostile ranges be
   const before = calls.length;
   const range = {item: 31, sourceIn: 0, sourceOut: 10};
   for (const bad of [
-    [], new Array(33).fill(range), [{...range, sourceOut: 0}], [{...range, sourceIn: -1}], [{...range, sourceOut: 1.5}],
+    [], new Array(513).fill(range), [{...range, sourceOut: 0}], [{...range, sourceIn: -1}], [{...range, sourceOut: 1.5}],
     [{...range, sourceOut: Number.MAX_SAFE_INTEGER + 1}], [{...range, item: 0}], [{...range, seconds: 1}], [null],
   ]) await assert.rejects(adapter.assemble({...input, ranges: bad as typeof ranges}), code("invalid"));
   await assert.rejects(adapter.assemble({...input, autoplay: true} as typeof input), code("invalid"));

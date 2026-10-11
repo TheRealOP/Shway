@@ -128,7 +128,9 @@ staged session. Appending was chosen over creating a sequence because proposals 
 active sequence and `file.newSequence` is a separate project edit; an empty new sequence is simply the
 case where appending starts at zero, and existing clips are never touched. Each range must be on finite,
 online media, inside the source, non-empty and on the sequence frame grid (rejected, never silently
-snapped; the adapter's `alignRange` widens ranges to the grid explicitly). Ranges count toward the 32-reference cap.
+snapped; the adapter's `alignRange` widens ranges to the grid explicitly). Ranges have their own cap of 512
+per proposal (counted before parsing, across steps), separate from the 32-reference cap of other steps, so a
+real first cut of 50+ ranges is still one preview and one undo step.
 Every placed clip is rechecked for lock state, exact range and linked A/V sync. The whole assembly
 is one preview, one commit and one undo step; cancel leaves the project untouched.
 

@@ -3269,7 +3269,21 @@ pub fn inspect_project(s: &Session) -> Value {
             "children": b.children.iter().map(|c| match c {
                 filmcraft_project::BinEntry::Item(i) => {
                     let it = p.item(*i);
-                    json!({"item": i.0, "name": it.map(|x| x.name.clone()), "type": it.map(|x| x.type_label()), "duration": it.map(|x| x.duration().0), "label": it.map(|x| x.label.name())})
+                    let mut v = json!({"item": i.0, "name": it.map(|x| x.name.clone()), "type": it.map(|x| x.type_label()), "duration": it.map(|x| x.duration().0), "label": it.map(|x| x.label.name())});
+                    // What an agent needs to transcribe a file and match a new sequence to it.
+                    if let Some(m) = it.and_then(|x| x.as_media()) {
+                        let rate = m.frame_rate();
+                        v["hasAudio"] = json!(m.info.has_audio());
+                        v["frameRate"] = json!({"num": rate.num, "den": rate.den});
+                        if let filmcraft_project::MediaRef::File { path } = &m.media {
+                            v["path"] = json!(path);
+                        }
+                        if let Some(video) = &m.info.video {
+                            v["width"] = json!(video.width);
+                            v["height"] = json!(video.height);
+                        }
+                    }
+                    v
                 }
                 filmcraft_project::BinEntry::Bin(b) => bin(b, p),
             }).collect::<Vec<_>>()

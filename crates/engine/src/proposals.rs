@@ -14,6 +14,8 @@ pub(crate) use tools::catalog as tool_catalog;
 
 const MAX_STEPS: usize = 16;
 const MAX_TARGETS: usize = 32;
+// A first cut appends many source ranges as ONE preview / undo step; ranges have their own bound.
+const MAX_PLACE_RANGES: usize = 512;
 // The browser boundary must represent every integer exactly, including ticks and IDs.
 const MAX_INTEGER: u64 = 9_007_199_254_740_991;
 
@@ -602,10 +604,18 @@ pub fn preview(s: &mut Session, v: &Value) -> Result<Value> {
     if steps.is_empty() || steps.len() > MAX_STEPS {
         return Err(bad("need 1–16 proposal steps"));
     }
-    let mut target_count = 0usize;
+    let (mut target_count, mut range_count) = (0usize, 0usize);
     for step in steps {
         let params = step.get("params");
-        let list = params.and_then(|p| p.get("clips").or_else(|| p.get("ranges")));
+        if step.get("command").and_then(Value::as_str) == Some("timeline.place") {
+            let ranges = params.and_then(|p| p.get("ranges")).and_then(Value::as_array).map_or(1, Vec::len);
+            range_count = range_count.checked_add(ranges).ok_or_else(|| bad("range count overflow"))?;
+            if range_count > MAX_PLACE_RANGES {
+                return Err(bad("at most 512 source ranges across the proposal"));
+            }
+            continue;
+        }
+        let list = params.and_then(|p| p.get("clips"));
         // A move references both its clip and its anchor.
         let count = list.and_then(Value::as_array).map_or(1, Vec::len) + usize::from(params.is_some_and(|p| p.get("anchor").is_some()));
         target_count = target_count.checked_add(count).ok_or_else(|| bad("target count overflow"))?;

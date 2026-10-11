@@ -158,7 +158,7 @@ function proposalInput(value: EditProposal): EditProposal {
   const sequence = integer(input.sequence, "sequence", 1);
   const checkedLabel = label(input.label);
   if (!Array.isArray(input.steps) || input.steps.length === 0 || input.steps.length > 16) invalid("proposal requires 1–16 steps");
-  let targets = 0;
+  let targets = 0, placed = 0;
   const steps = Array.from(input.steps, (value, i): ProposalStep => {
     const step = object(value, `steps[${i}]`); keys(step, ["command", "params"], `steps[${i}]`);
     const params = object(step.params, `steps[${i}].params`);
@@ -181,7 +181,8 @@ function proposalInput(value: EditProposal): EditProposal {
     }
     if (step.command === "timeline.place") {
       keys(params, ["ranges"], "place");
-      if (!Array.isArray(params.ranges) || params.ranges.length === 0 || params.ranges.length > 32) invalid("place requires 1–32 ranges");
+      // A first cut is one preview: source ranges have their own bound (engine MAX_PLACE_RANGES).
+      if (!Array.isArray(params.ranges) || params.ranges.length === 0 || (placed += params.ranges.length) > 512) invalid("place requires 1–512 ranges");
       const ranges = Array.from(params.ranges, (value, j): SourceRange => {
         const range = object(value, `ranges[${j}]`); keys(range, ["item", "sourceIn", "sourceOut"], `ranges[${j}]`);
         const item = integer(range.item, `ranges[${j}].item`, 1), sourceIn = integer(range.sourceIn, `ranges[${j}].sourceIn`);
@@ -189,7 +190,6 @@ function proposalInput(value: EditProposal): EditProposal {
         if (sourceOut <= sourceIn) invalid(`ranges[${j}] must have sourceIn < sourceOut`);
         return {item, sourceIn, sourceOut};
       });
-      targets += ranges.length;
       return {command: step.command, params: {ranges}};
     }
     if (step.command === "timeline.remove") {
